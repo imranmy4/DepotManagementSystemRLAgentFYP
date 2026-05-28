@@ -1,0 +1,7 @@
+.venv
+CLAUDE.md
+__pycache__/
+logs/*
+!logs/.gitkeep
+models/*
+!models/.gitkeep
