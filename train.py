@@ -1,25 +1,23 @@
 """Config-driven training harness for the depot agent.
 
-Run a single named experiment:
-    python train.py full
-    python train.py tiny
-    python train.py abl_reshuffle_count_only
+Config comes from config.ini (see configloader.py); named experiments below apply
+deltas on top of that base, and any field can be overridden on the CLI.
 
-Verify the harness wiring without a real run (tiny step budget):
-    python train.py full --smoke
+    python train.py full                       # full config from config.ini
+    python train.py full --n_blocks 5 --w_reshuffle 4   # CLI overrides
+    python train.py abl_reshuffle_heavy        # an ablation delta
+    python train.py full --smoke               # tiny budget, just verify wiring
 
-Override the step budget:
-    python train.py full --timesteps 1000000
+Precedence: dataclass defaults < config.ini < experiment delta < CLI override.
+The resolved config is snapshotted to models/<name>/config_used.ini so evaluation
+always uses the exact config a model was trained with.
 
-Experiments are defined in EXPERIMENTS below. The "full" experiment is the full
-DepotConfig; the "abl_*" experiments are config-only ablations on top of it
-(reward-weight / threshold sweeps that need no code changes). Ablations that
-require env/reward/reshuffle code changes (state composition, travel scope,
-MinMax priority, corridor scope, warmstart) are NOT in here yet.
+Ablations that need env/reward/reshuffle code changes (state composition, travel
+scope, MinMax priority, corridor scope, warmstart) are NOT here yet — see CLAUDE.md.
 """
 import os
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
@@ -30,6 +28,47 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 
 from depot_env import DepotEnv, DepotConfig
 from reward import RewardConfig
+import configloader
+
+
+@dataclass
+class TrainConfig:
+    total_timesteps: int = 2_000_000
+    n_envs: int = 8
+    # MLP policy: CPU beats GPU here (tiny net, env-stepping bound). ~997 vs ~781 fps.
+    device: str = "cpu"
+    learning_rate: float = 3e-4
+    n_steps: int = 2048
+    batch_size: int = 256
+    n_epochs: int = 10
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_range: float = 0.2
+
+
+PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
+            "gamma", "gae_lambda", "clip_range"]
+
+# Each experiment is a delta applied on top of the config.ini base. "full" = base.
+EXPERIMENTS = {
+    "full": {},
+
+    # Sanity check: tiny depot, short budget, single env.
+    "tiny": {
+        "depot": dict(n_blocks=2, n_bays=2, n_rows=2, n_tiers=2, n_ticks=10, max_in=2, max_out=2),
+        "train": dict(total_timesteps=100_000, n_envs=1, n_steps=512, batch_size=64),
+    },
+
+    # ---- Config-only ablations on the full config -------------------------
+    "abl_reshuffle_count_only": {
+        "reward": dict(reshuffle_mult_same=1.0, reshuffle_mult_adjacent=1.0, reshuffle_mult_far=1.0),
+    },
+    "abl_travel_div3":     {"reward": dict(threshold_divisor=3)},
+    "abl_travel_div4":     {"reward": dict(threshold_divisor=4)},
+    "abl_dwell_heavy":     {"reward": dict(w_dwell=2.0)},
+    "abl_travel_heavy":    {"reward": dict(w_travel=0.6)},
+    "abl_reshuffle_heavy": {"reward": dict(w_reshuffle=2.0)},
+}
 
 
 def mask_fn(env):
@@ -53,79 +92,51 @@ def make_vec_env(depot_config, reward_config, n_envs):
     return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
 
-# Default PPO hyperparameters (per-experiment overrides via Experiment.ppo)
-DEFAULT_PPO = dict(
-    learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=256,
-    n_epochs=10,
-    gamma=0.99,
-    gae_lambda=0.95,
-    clip_range=0.2,
-)
+def resolve_config(experiment, args=None, ini_path="config.ini"):
+    """Build (DepotConfig, RewardConfig, TrainConfig) for an experiment.
+
+    Layers: config.ini base -> experiment delta -> CLI overrides (if args given).
+    """
+    parser = configloader.read_ini(ini_path)
+    depot = configloader.load_dataclass(DepotConfig, parser, "depot")
+    reward = configloader.load_dataclass(RewardConfig, parser, "reward")
+    train_cfg = configloader.load_dataclass(TrainConfig, parser, "train")
+
+    delta = EXPERIMENTS[experiment]
+    depot = replace(depot, **delta.get("depot", {}))
+    reward = replace(reward, **delta.get("reward", {}))
+    train_cfg = replace(train_cfg, **delta.get("train", {}))
+
+    if args is not None:
+        depot = configloader.apply_cli(depot, args)
+        reward = configloader.apply_cli(reward, args)
+        train_cfg = configloader.apply_cli(train_cfg, args)
+
+    return depot, reward, train_cfg
 
 
-@dataclass
-class Experiment:
-    name: str
-    depot: DepotConfig
-    reward: RewardConfig
-    total_timesteps: int = 2_000_000
-    n_envs: int = 8
-    ppo: dict = field(default_factory=dict)
-
-
-TINY = DepotConfig(n_blocks=2, n_bays=2, n_rows=2, n_tiers=2, n_ticks=10, max_in=2, max_out=2)
-FULL = DepotConfig()  # defaults are the full config (B=6, Ba=4, R=4, H=6, N=30)
-
-# Multipliers all equal -> pure count-based reshuffle penalty (scope ablation).
-RESHUFFLE_COUNT_ONLY = RewardConfig(
-    reshuffle_mult_same=1.0, reshuffle_mult_adjacent=1.0, reshuffle_mult_far=1.0,
-)
-
-EXPERIMENTS = {
-    # Sanity check (matches the original tiny run / evaluate.py default)
-    "tiny": Experiment("tiny", TINY, RewardConfig(),
-                       total_timesteps=100_000, n_envs=1,
-                       ppo=dict(n_steps=512, batch_size=64)),
-
-    # Full-config baseline
-    "full": Experiment("full", FULL, RewardConfig()),
-
-    # ---- Config-only ablations on the full config -------------------------
-    # Reshuffle penalty: scope-scaled (baseline) vs count-only
-    "abl_reshuffle_count_only": Experiment("abl_reshuffle_count_only", FULL, RESHUFFLE_COUNT_ONLY),
-    # Travel threshold divisor sweep (baseline divisor = 2)
-    "abl_travel_div3": Experiment("abl_travel_div3", FULL, RewardConfig(threshold_divisor=3)),
-    "abl_travel_div4": Experiment("abl_travel_div4", FULL, RewardConfig(threshold_divisor=4)),
-    # Reward-weight ratio sweeps
-    "abl_dwell_heavy":   Experiment("abl_dwell_heavy", FULL, RewardConfig(w_dwell=2.0)),
-    "abl_travel_heavy":  Experiment("abl_travel_heavy", FULL, RewardConfig(w_travel=0.6)),
-    "abl_reshuffle_heavy": Experiment("abl_reshuffle_heavy", FULL, RewardConfig(w_reshuffle=2.0)),
-}
-
-
-def train(exp: Experiment, total_timesteps=None):
-    steps = total_timesteps if total_timesteps is not None else exp.total_timesteps
-    model_dir = f"./models/{exp.name}/"
+def train(name, depot, reward, train_cfg, total_timesteps=None):
+    steps = total_timesteps if total_timesteps is not None else train_cfg.total_timesteps
+    model_dir = f"./models/{name}/"
     os.makedirs(model_dir, exist_ok=True)
 
-    vec_env = make_vec_env(exp.depot, exp.reward, exp.n_envs)
-    ppo_kwargs = {**DEFAULT_PPO, **exp.ppo}
+    # Snapshot the exact config used, so evaluation can reproduce it.
+    configloader.dump_configs(os.path.join(model_dir, "config_used.ini"),
+                              {"depot": depot, "reward": reward, "train": train_cfg})
+
+    vec_env = make_vec_env(depot, reward, train_cfg.n_envs)
+    ppo_kwargs = {k: getattr(train_cfg, k) for k in PPO_KEYS}
     model = MaskablePPO(
         MaskableActorCriticPolicy,
         vec_env,
         verbose=1,
-        # MLP policy: CPU is faster than GPU here (tiny net, env-stepping bound;
-        # GPU transfer overhead dominates). Benchmarked ~997 vs ~781 fps.
-        device="cpu",
-        tensorboard_log=f"./logs/{exp.name}/",
+        device=train_cfg.device,
+        tensorboard_log=f"./logs/{name}/",
         **ppo_kwargs,
     )
 
-    # Checkpoint roughly every 50k env steps (save_freq counts per-env steps)
     checkpoint_cb = CheckpointCallback(
-        save_freq=max(50_000 // exp.n_envs, 1),
+        save_freq=max(50_000 // train_cfg.n_envs, 1),
         save_path=model_dir,
         name_prefix="depot_ppo",
     )
@@ -134,24 +145,26 @@ def train(exp: Experiment, total_timesteps=None):
 
     model.save(os.path.join(model_dir, "depot_ppo_final"))
     vec_env.save(os.path.join(model_dir, "vec_normalize.pkl"))
-    print(f"Training complete for '{exp.name}' ({steps} steps) ✓")
+    print(f"Training complete for '{name}' ({steps} steps) ✓")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Train the depot agent on a named experiment.")
     ap.add_argument("experiment", nargs="?", default="tiny", choices=list(EXPERIMENTS),
                     help="experiment to run (default: tiny)")
-    ap.add_argument("--timesteps", type=int, default=None, help="override total timesteps")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny step budget just to verify the harness runs end-to-end")
+    # Auto-generated --field overrides for every config field.
+    configloader.add_cli_args(ap, DepotConfig)
+    configloader.add_cli_args(ap, RewardConfig)
+    configloader.add_cli_args(ap, TrainConfig)
     args = ap.parse_args()
 
-    exp = EXPERIMENTS[args.experiment]
-    steps = args.timesteps
+    depot, reward, train_cfg = resolve_config(args.experiment, args)
+    steps = train_cfg.n_steps * train_cfg.n_envs * 2 if args.smoke else None
     if args.smoke:
-        steps = exp.ppo.get("n_steps", DEFAULT_PPO["n_steps"]) * exp.n_envs * 2
-        print(f"[smoke] running '{exp.name}' for {steps} steps to verify wiring")
-    train(exp, total_timesteps=steps)
+        print(f"[smoke] running '{args.experiment}' for {steps} steps to verify wiring")
+    train(args.experiment, depot, reward, train_cfg, total_timesteps=steps)
 
 
 if __name__ == "__main__":

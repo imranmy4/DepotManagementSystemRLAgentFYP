@@ -26,9 +26,11 @@ import numpy as np
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from depot_env import DepotEnv
+from depot_env import DepotEnv, DepotConfig
+from reward import RewardConfig
 from baselines import random_action, fifo_action, nearest_action
-from train import EXPERIMENTS
+from train import EXPERIMENTS, resolve_config
+import configloader
 
 N_EPISODES = 200
 
@@ -107,6 +109,17 @@ def standardise(results):
     return norm
 
 
+def load_eval_config(experiment, model_dir):
+    """Prefer the config snapshot saved at train time; else resolve from config.ini."""
+    snap = os.path.join(model_dir, "config_used.ini")
+    if os.path.exists(snap):
+        p = configloader.read_ini(snap)
+        return (configloader.load_dataclass(DepotConfig, p, "depot"),
+                configloader.load_dataclass(RewardConfig, p, "reward"))
+    depot, reward, _ = resolve_config(experiment)
+    return depot, reward
+
+
 def make_agent_policy(depot_config, model_path, vecnorm_path):
     """Load the trained agent; return choose_action(env, obs) or None if missing."""
     if not (os.path.exists(model_path + ".zip") and os.path.exists(vecnorm_path)):
@@ -129,9 +142,8 @@ def main():
     ap.add_argument("--episodes", type=int, default=N_EPISODES)
     args = ap.parse_args()
 
-    exp = EXPERIMENTS[args.experiment]
-    depot_config, reward_config = exp.depot, exp.reward
     model_dir = f"models/{args.experiment}"
+    depot_config, reward_config = load_eval_config(args.experiment, model_dir)
 
     rng = np.random.default_rng(0)
     policies = {
