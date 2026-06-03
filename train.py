@@ -45,12 +45,9 @@ class TrainConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    # Small entropy bonus to keep exploring; the old run's policy never sharpened
-    # (entropy stuck ~2.6) yet was still a poor local optimum, so we want exploration
-    # pressure plus a richer observation/net to escape it.
+    # Small entropy bonus to keep exploring 
     ent_coef: float = 0.01
     # Hidden layer sizes for both the policy and value MLP heads, comma-separated.
-    # Parsed in train(); the SB3 default [64, 64] is far too small for the ~1.5k-dim obs.
     net_arch: str = "256,256"
 
 
@@ -157,7 +154,7 @@ def train(name, depot, reward, train_cfg, total_timesteps=None):
     )
 
     # Periodically evaluate on a held-out env and keep the best checkpoint
-    # (best_model.zip) — the final model is not necessarily the best, since reward is
+    # (best_model.zip). The final model is not necessarily the best, since reward is
     # non-monotonic. The eval env is VecNormalize-wrapped so MaskableEvalCallback syncs
     # the obs-normalisation stats from the training env before each eval; norm_reward is
     # off there so the reported eval reward is the raw env reward.

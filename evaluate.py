@@ -1,23 +1,24 @@
-"""Step 7/8 — compare the trained agent against heuristic baselines.
+"""Compare the trained agent against heuristic baselines on operational metrics.
 
     python evaluate.py            # evaluate the 'tiny' experiment (default)
     python evaluate.py full       # evaluate the full-config run
     python evaluate.py abl_travel_div3
 
-All policies run on a bare (seeded) DepotEnv so they see identical demand
-sequences per episode (paired comparison). The agent reuses its saved
-VecNormalize statistics to normalise observations the same way it saw them in
-training; rewards reported are the raw env rewards for every policy.
+All policies run on a bare (seeded) DepotEnv so they see identical demand sequences per
+episode (paired comparison). The agent reuses its saved VecNormalize statistics to
+normalise observations the same way it saw them in training; rewards reported are the raw
+env rewards for every policy. The agent is reported BOTH deterministic ('Agent', argmax)
+and stochastic ('Agent-sto', sampled) — a poorly-peaked policy scores very differently
+between the two.
 
 Two tables are printed:
-  1. Raw operational metrics (mean ± std).
-  2. Standardised scores in [0, 1] (0 = best policy, 1 = worst) per metric, plus
-     a single Combined score (weighted mean of the standardised metrics).
-
-Operational metrics (all "lower is better"):
-  dwell_time     time-averaged yard mean dwell  (mean container idle time)
-  crane_travel   total outbound Manhattan distance
-  reshuffles     total relocations performed
+  1. RAW — per-episode quantities (mean ± std): reward and the absolute per-episode
+     counts/totals (inbound, outbound, crane travel, reshuffles).
+  2. PERFORMANCE — pooled rates/averages (lower = better):
+        reshuffle%   total reshuffles / total outbound retrievals
+        dig_rate%    share of retrievals that needed at least one reshuffle
+        travel/out   average crane Manhattan distance per retrieval
+        yard_dwell   time-averaged yard mean dwell (avg container idle, ticks)
 """
 import os
 import argparse
@@ -34,20 +35,24 @@ import configloader
 
 N_EPISODES = 200
 
-# Operational objectives (all minimised) and the weights used for the combined score.
-OP_METRICS = ["dwell_time", "crane_travel", "reshuffles"]
-COMBINED_WEIGHTS = {"dwell_time": 1.0, "crane_travel": 1.0, "reshuffles": 1.0}
+# Per-episode quantities collected by run_episode.
+METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
+               "reshuffles", "digs", "yard_dwell"]
 
 
 def _outbound_metrics(env, action):
-    """Raw operational metrics for an action, read BEFORE the env steps."""
+    """Per-action operational metrics, read BEFORE the env steps (None if inbound).
+
+    reshuffles = number of containers above the target that must be relocated.
+    """
     kind = env.decode_action(action)
     if kind[0] != "outbound":
         return None
     _, bl, ba, r, h = kind
     height = int((env.grid[bl, ba, r, :] >= 0).sum())
     cb, cba, cr = env.crane_pos
-    return {"dist": abs(bl - cb) + abs(ba - cba) + abs(r - cr), "reshuffles": height - 1 - h}
+    return {"dist": abs(bl - cb) + abs(ba - cba) + abs(r - cr),
+            "reshuffles": height - 1 - h}
 
 
 def _yard_mean_dwell(env):
@@ -59,6 +64,7 @@ def run_episode(env, choose_action, seed):
     """choose_action(env, obs) -> action int. Returns this episode's metrics."""
     obs, _ = env.reset(seed=seed)
     reward = crane_travel = reshuffles = 0.0
+    n_in = n_out = n_dig = 0
     dwell_samples = []
     done = False
     while not done:
@@ -66,47 +72,52 @@ def run_episode(env, choose_action, seed):
         m = _outbound_metrics(env, action)
         obs, r, term, trunc, _ = env.step(action)
         reward += r
-        if m is not None:
+        if m is not None:                      # an outbound retrieval
+            n_out += 1
             crane_travel += m["dist"]
             reshuffles += m["reshuffles"]
+            if m["reshuffles"] > 0:
+                n_dig += 1
+        else:                                  # an inbound placement
+            n_in += 1
         dwell_samples.append(_yard_mean_dwell(env))
         done = term or trunc
     return {
         "reward": reward,
-        "dwell_time": float(np.mean(dwell_samples)) if dwell_samples else 0.0,
+        "inbound": n_in,
+        "outbound": n_out,
         "crane_travel": crane_travel,
         "reshuffles": reshuffles,
+        "digs": n_dig,
+        "yard_dwell": float(np.mean(dwell_samples)) if dwell_samples else 0.0,
     }
 
 
 def evaluate(choose_action, depot_config, reward_config, n_episodes=N_EPISODES):
+    """Run n_episodes (seeds 0..n-1); return per-episode samples for each metric."""
     env = DepotEnv(depot_config, reward_config=reward_config)
-    keys = ["reward"] + OP_METRICS
-    acc = {k: [] for k in keys}
+    acc = {k: [] for k in METRIC_KEYS}
     for s in range(n_episodes):
         ep = run_episode(env, choose_action, seed=s)
-        for k in keys:
+        for k in METRIC_KEYS:
             acc[k].append(ep[k])
-    return {k: (float(np.mean(v)), float(np.std(v))) for k, v in acc.items()}
+    return {k: np.asarray(v, dtype=float) for k, v in acc.items()}
 
 
-def standardise(results):
-    """Min-max normalise each operational metric across policies (0 = best, 1 = worst)
-    and compute the weighted-mean combined score."""
-    means = {name: {m: results[name][m][0] for m in OP_METRICS} for name in results}
-    norm = {name: {} for name in results}
-    for m in OP_METRICS:
-        vals = [means[name][m] for name in results]
-        lo, hi = min(vals), max(vals)
-        span = hi - lo
-        for name in results:
-            norm[name][m] = 0.0 if span == 0 else (means[name][m] - lo) / span
-    wsum = sum(COMBINED_WEIGHTS.values())
-    for name in results:
-        norm[name]["combined"] = sum(
-            COMBINED_WEIGHTS[m] * norm[name][m] for m in OP_METRICS
-        ) / wsum
-    return norm
+def performance(res):
+    """Pooled rates/averages from per-episode samples (one number per metric).
+
+    Rates are pooled (sum numerator / sum denominator) rather than a mean of per-episode
+    ratios, so episodes with few retrievals don't distort them.
+    """
+    tot_out = res["outbound"].sum()
+    tot_out = tot_out if tot_out > 0 else 1.0   # guard against an all-inbound run
+    return {
+        "reshuffle%": 100.0 * res["reshuffles"].sum() / tot_out,
+        "dig_rate%":  100.0 * res["digs"].sum() / tot_out,
+        "travel/out": res["crane_travel"].sum() / tot_out,
+        "yard_dwell": float(res["yard_dwell"].mean()),
+    }
 
 
 def load_eval_config(experiment, model_dir):
@@ -120,20 +131,34 @@ def load_eval_config(experiment, model_dir):
     return depot, reward
 
 
-def make_agent_policy(depot_config, model_path, vecnorm_path):
-    """Load the trained agent; return choose_action(env, obs) or None if missing."""
+def make_agent_policies(depot_config, model_dir):
+    """Load the trained agent once; return ({label: choose_action}, checkpoint_name).
+
+    Provides BOTH a deterministic ('Agent') and a stochastic ('Agent-sto') policy: a
+    poorly-peaked policy can score very differently under argmax vs sampling, so we
+    report both instead of hiding the gap behind a single deterministic number. Prefers
+    the EvalCallback best_model over the final checkpoint. Returns ({}, None) if no model.
+    """
+    best = os.path.join(model_dir, "best_model")
+    final = os.path.join(model_dir, "depot_ppo_final")
+    model_path = best if os.path.exists(best + ".zip") else final
+    vecnorm_path = os.path.join(model_dir, "vec_normalize.pkl")
     if not (os.path.exists(model_path + ".zip") and os.path.exists(vecnorm_path)):
-        return None
+        return {}, None
+
     vecnorm = VecNormalize.load(vecnorm_path, DummyVecEnv([lambda: DepotEnv(depot_config)]))
     vecnorm.training = False
     model = MaskablePPO.load(model_path)
 
-    def choose(env, obs):
-        nobs = vecnorm.normalize_obs(obs.astype(np.float32))
-        action, _ = model.predict(nobs, action_masks=env.action_masks(), deterministic=True)
-        return int(np.asarray(action).reshape(-1)[0])
+    def make(determ):
+        def choose(env, obs):
+            nobs = vecnorm.normalize_obs(obs.astype(np.float32))
+            action, _ = model.predict(nobs, action_masks=env.action_masks(),
+                                      deterministic=determ)
+            return int(np.asarray(action).reshape(-1)[0])
+        return choose
 
-    return choose
+    return {"Agent": make(True), "Agent-sto": make(False)}, os.path.basename(model_path)
 
 
 def main():
@@ -151,40 +176,40 @@ def main():
         "FIFO":    lambda env, obs: fifo_action(env, rng),
         "Nearest": lambda env, obs: nearest_action(env, rng),
     }
-    agent = make_agent_policy(depot_config,
-                              os.path.join(model_dir, "depot_ppo_final"),
-                              os.path.join(model_dir, "vec_normalize.pkl"))
-    if agent is not None:
-        policies["Agent"] = agent
+    agent_policies, ckpt = make_agent_policies(depot_config, model_dir)
+    if agent_policies:
+        print(f"(agent loaded from '{ckpt}' checkpoint)")
+        policies.update(agent_policies)
     else:
-        print(f"(no trained model in {model_dir}/ — skipping Agent row)\n")
+        print(f"(no trained model in {model_dir}/ — skipping Agent rows)")
 
     results = {name: evaluate(choose, depot_config, reward_config, args.episodes)
                for name, choose in policies.items()}
-    norm = standardise(results)
 
-    # Table 1 — raw metrics
-    raw_cols = [("reward", "reward ↑"), ("dwell_time", "dwell_time ↓"),
+    print(f"\nExperiment '{args.experiment}' — {args.episodes} episodes\n")
+
+    # Table 1 — raw per-episode quantities
+    raw_cols = [("reward", "reward ↑"), ("inbound", "inbound"), ("outbound", "outbound"),
                 ("crane_travel", "crane_travel ↓"), ("reshuffles", "reshuffles ↓")]
-    print(f"Experiment '{args.experiment}' — {args.episodes} episodes\n")
-    print("RAW METRICS (mean ± std)")
-    header = f"{'policy':<9}" + "".join(f"{lab:>18}" for _, lab in raw_cols)
+    print("RAW — per episode (mean ± std)")
+    header = f"{'policy':<10}" + "".join(f"{lab:>16}" for _, lab in raw_cols)
     print(header)
     print("-" * len(header))
     for name, res in results.items():
-        row = f"{name:<9}" + "".join(
-            f"{f'{res[k][0]:.2f}±{res[k][1]:.2f}':>18}" for k, _ in raw_cols)
-        print(row)
+        print(f"{name:<10}" + "".join(
+            f"{f'{res[k].mean():.1f}±{res[k].std():.1f}':>16}" for k, _ in raw_cols))
 
-    # Table 2 — standardised scores + combined, ranked best-first
-    norm_cols = OP_METRICS + ["combined"]
-    print("\nSTANDARDISED SCORES  (0 = best policy, 1 = worst; combined = weighted mean)")
-    header = f"{'policy':<9}" + "".join(f"{c:>16}" for c in norm_cols)
+    # Table 2 — pooled performance rates / averages
+    perf = {name: performance(res) for name, res in results.items()}
+    perf_cols = ["reshuffle%", "dig_rate%", "travel/out", "yard_dwell"]
+    print("\nPERFORMANCE — pooled over all episodes (lower = better)")
+    print("  reshuffle% = reshuffles/outbound   dig_rate% = retrievals needing a dig")
+    print("  travel/out = avg crane dist/retrieval   yard_dwell = avg idle (ticks)")
+    header = f"{'policy':<10}" + "".join(f"{c:>13}" for c in perf_cols)
     print(header)
     print("-" * len(header))
-    for name in sorted(norm, key=lambda n: norm[n]["combined"]):
-        row = f"{name:<9}" + "".join(f"{norm[name][c]:>16.3f}" for c in norm_cols)
-        print(row)
+    for name, pv in perf.items():
+        print(f"{name:<10}" + "".join(f"{pv[c]:>13.2f}" for c in perf_cols))
 
 
 if __name__ == "__main__":
