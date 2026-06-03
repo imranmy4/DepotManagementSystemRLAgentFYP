@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -44,10 +45,18 @@ class TrainConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
+    # Small entropy bonus to keep exploring; the old run's policy never sharpened
+    # (entropy stuck ~2.6) yet was still a poor local optimum, so we want exploration
+    # pressure plus a richer observation/net to escape it.
+    ent_coef: float = 0.01
+    # Hidden layer sizes for both the policy and value MLP heads, comma-separated.
+    # Parsed in train(); the SB3 default [64, 64] is far too small for the ~1.5k-dim obs.
+    net_arch: str = "256,256"
 
 
+# Direct MaskablePPO constructor kwargs (net_arch is handled separately via policy_kwargs).
 PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
-            "gamma", "gae_lambda", "clip_range"]
+            "gamma", "gae_lambda", "clip_range", "ent_coef"]
 
 # Each experiment is a delta applied on top of the config.ini base. "full" = base.
 EXPERIMENTS = {
@@ -126,9 +135,15 @@ def train(name, depot, reward, train_cfg, total_timesteps=None):
 
     vec_env = make_vec_env(depot, reward, train_cfg.n_envs)
     ppo_kwargs = {k: getattr(train_cfg, k) for k in PPO_KEYS}
+
+    # net_arch comes from config as e.g. "256,256"; same hidden sizes for actor & critic.
+    layers = [int(x) for x in str(train_cfg.net_arch).split(",") if x.strip()]
+    policy_kwargs = dict(net_arch=dict(pi=layers, vf=layers))
+
     model = MaskablePPO(
         MaskableActorCriticPolicy,
         vec_env,
+        policy_kwargs=policy_kwargs,
         verbose=1,
         device=train_cfg.device,
         tensorboard_log=f"./logs/{name}/",
@@ -141,7 +156,25 @@ def train(name, depot, reward, train_cfg, total_timesteps=None):
         name_prefix="depot_ppo",
     )
 
-    model.learn(total_timesteps=steps, callback=checkpoint_cb, progress_bar=True)
+    # Periodically evaluate on a held-out env and keep the best checkpoint
+    # (best_model.zip) — the final model is not necessarily the best, since reward is
+    # non-monotonic. The eval env is VecNormalize-wrapped so MaskableEvalCallback syncs
+    # the obs-normalisation stats from the training env before each eval; norm_reward is
+    # off there so the reported eval reward is the raw env reward.
+    eval_env = make_vec_env(depot, reward, 1)
+    eval_env.training = False
+    eval_env.norm_reward = False
+    eval_cb = MaskableEvalCallback(
+        eval_env,
+        best_model_save_path=model_dir,
+        log_path=model_dir,
+        eval_freq=max(25_000 // train_cfg.n_envs, 1),
+        n_eval_episodes=20,
+        deterministic=True,
+    )
+
+    model.learn(total_timesteps=steps,
+                callback=[checkpoint_cb, eval_cb], progress_bar=True)
 
     model.save(os.path.join(model_dir, "depot_ppo_final"))
     vec_env.save(os.path.join(model_dir, "vec_normalize.pkl"))

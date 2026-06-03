@@ -33,18 +33,25 @@ class DepotEnv(gym.Env):
         self.n_outbound = self.B * self.Ba * self.R * self.H
         self.n_actions  = self.n_inbound + self.n_outbound
 
-        # Observation feature count
-        # grid + dist_to_cr + max_d + (mode, tick, crane_pos[3], occ, mean_d, std_d) = 8
-        grid_size      = self.B * self.Ba * self.R * self.H
-        dist_size      = self.B * self.Ba * self.R
-        max_d_size     = self.B
-        scalar_size    = 8  # mode, tick, crane_pos(3), occ, mean_d, std_d
-        self.obs_size  = grid_size + dist_size + max_d_size + scalar_size
+        # Observation feature count. Two per-tier channels (occupancy + dwell) keep full
+        # grid information without a -1 sentinel; four per-stack summaries (height,
+        # top_dwell, max_dwell, dist_to_cr) expose the decision-relevant order statistics
+        # directly so the policy needn't recompute them from the raw grid. See _get_obs.
+        grid_size    = self.B * self.Ba * self.R * self.H   # per channel
+        stack_size   = self.B * self.Ba * self.R            # per per-stack feature
+        n_grid_ch    = 2   # occupancy, dwell
+        n_stack_feat = 4   # height, top_dwell, max_dwell, dist_to_cr
+        max_d_size   = self.B
+        scalar_size  = 8   # mode, tick, crane_pos(3), occ, mean_d, std_d
+        self.obs_size = (n_grid_ch * grid_size
+                         + n_stack_feat * stack_size
+                         + max_d_size + scalar_size)
 
-        # Gymnasium spaces
+        # Gymnasium spaces. Every feature is now >= 0 (empty slots encode as 0 in the
+        # dwell channel and are flagged by the occupancy channel), so low=0.
         self.action_space = spaces.Discrete(self.n_actions)
         self.observation_space = spaces.Box(
-            low=-1.0,
+            low=0.0,
             high=np.inf,
             shape=(self.obs_size,),
             dtype=np.float32,
@@ -63,8 +70,32 @@ class DepotEnv(gym.Env):
         self._last_breakdown = {}  # for logging
 
     def _get_obs(self) -> np.ndarray:
-        """Build flat observation vector"""
-        occupied_mask = self.grid >= 0
+        """# Build flat observation vector.
+
+        ## Grid channels (B, Ba, R, H):
+        - occupancy: 1 if slot occupied, 0 if empty
+        - dwell: how long the container in the slot has been there; 0 for empty slots (because of the occupancy channel, no -1 sentinel needed)
+        
+        ## Per-stack summaries (B, Ba, R):
+        - height: how many tiers are occupied
+        - top_dwell: dwell of the topmost container (0 for empty stacks)
+        - max_dwell: dwell of the oldest container (0 for empty stacks)
+        - dist_to_cr: Manhattan distance from the stack to the crane's current position
+        """
+        occupied_mask = self.grid >= 0                       # (B, Ba, R, H)
+        occupancy = occupied_mask.astype(np.float32)         # 1 occupied / 0 empty
+        dwell_ch = np.where(occupied_mask, self.grid, 0).astype(np.float32)
+
+        heights = occupied_mask.sum(axis=3)                  # (B, Ba, R)
+
+        # Topmost container's dwell: the 0-reshuffle retrieval option; 0 for empty stacks.
+        top_idx = np.clip(heights - 1, 0, self.H - 1)
+        top_dwell = np.take_along_axis(self.grid, top_idx[..., None], axis=3)[..., 0]
+        top_dwell = np.where(heights > 0, top_dwell, 0).astype(np.float32)
+
+        # Oldest container anywhere in the stack; 0 for empty stacks (-1 max otherwise).
+        stack_max = self.grid.max(axis=3)
+        max_dwell = np.where(stack_max >= 0, stack_max, 0).astype(np.float32)
 
         # Per-stack Manhattan distance from current crane position
         bl_idx = np.arange(self.B).reshape(self.B, 1, 1)
@@ -87,15 +118,20 @@ class DepotEnv(gym.Env):
             mean_d = 0.0
             std_d = 0.0
 
-        # Per-block max dwell: -1 sentinel falls out naturally for empty blocks
-        max_d = self.grid.reshape(self.B, -1).max(axis=1).astype(np.float32)
+        # Per-block max dwell: 0 for an empty block (no -1 sentinel in the observation)
+        block_max = self.grid.reshape(self.B, -1).max(axis=1)
+        max_d = np.where(block_max >= 0, block_max, 0).astype(np.float32)
 
         obs = np.concatenate([
-            self.grid.astype(np.float32).flatten(),
+            occupancy.flatten(),
+            dwell_ch.flatten(),
+            heights.astype(np.float32).flatten(),
+            top_dwell.flatten(),
+            max_dwell.flatten(),
+            dist_to_cr.flatten(),
             [float(self.mode)],
             [float(self.tick)],
             self.crane_pos.astype(np.float32),
-            dist_to_cr.flatten(),
             [occ_ratio],
             [mean_d],
             [std_d],
