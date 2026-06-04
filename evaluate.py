@@ -32,6 +32,7 @@ from reward import RewardConfig
 from baselines import random_action, fifo_action, nearest_action
 from train import EXPERIMENTS, resolve_config
 import configloader
+import runs
 
 N_EPISODES = 200
 
@@ -120,9 +121,9 @@ def performance(res):
     }
 
 
-def load_eval_config(experiment, model_dir):
+def load_eval_config(experiment, run_dir):
     """Prefer the config snapshot saved at train time; else resolve from config.ini."""
-    snap = os.path.join(model_dir, "config_used.ini")
+    snap = os.path.join(run_dir, "config_used.ini")
     if os.path.exists(snap):
         p = configloader.read_ini(snap)
         return (configloader.load_dataclass(DepotConfig, p, "depot"),
@@ -131,19 +132,17 @@ def load_eval_config(experiment, model_dir):
     return depot, reward
 
 
-def make_agent_policies(depot_config, model_dir):
-    """Load the trained agent once; return ({label: choose_action}, checkpoint_name).
+def make_agent_policies(depot_config, run_dir):
+    """Load the trained agent once; return ({label: choose_action}, model_name).
 
     Provides BOTH a deterministic ('Agent') and a stochastic ('Agent-sto') policy: a
     poorly-peaked policy can score very differently under argmax vs sampling, so we
-    report both instead of hiding the gap behind a single deterministic number. Prefers
-    the EvalCallback best_model over the final checkpoint. Returns ({}, None) if no model.
+    report both instead of hiding the gap behind a single deterministic number. The
+    model + matching normalizer (best_model, else final) are resolved by runs.resolve_model.
+    Returns ({}, None) if no loadable model is present.
     """
-    best = os.path.join(model_dir, "best_model")
-    final = os.path.join(model_dir, "depot_ppo_final")
-    model_path = best if os.path.exists(best + ".zip") else final
-    vecnorm_path = os.path.join(model_dir, "vec_normalize.pkl")
-    if not (os.path.exists(model_path + ".zip") and os.path.exists(vecnorm_path)):
+    model_path, vecnorm_path = runs.resolve_model(run_dir)
+    if model_path is None:
         return {}, None
 
     vecnorm = VecNormalize.load(vecnorm_path, DummyVecEnv([lambda: DepotEnv(depot_config)]))
@@ -165,10 +164,12 @@ def main():
     ap = argparse.ArgumentParser(description="Compare the trained agent vs baselines.")
     ap.add_argument("experiment", nargs="?", default="tiny", choices=list(EXPERIMENTS))
     ap.add_argument("--episodes", type=int, default=N_EPISODES)
+    ap.add_argument("--run", default=None,
+                    help="run id / path to evaluate (default: CURRENT pointer, else latest)")
     args = ap.parse_args()
 
-    model_dir = f"models/{args.experiment}"
-    depot_config, reward_config = load_eval_config(args.experiment, model_dir)
+    run_dir = runs.resolve_run_dir(args.experiment, args.run)
+    depot_config, reward_config = load_eval_config(args.experiment, run_dir)
 
     rng = np.random.default_rng(0)
     policies = {
@@ -176,12 +177,12 @@ def main():
         "FIFO":    lambda env, obs: fifo_action(env, rng),
         "Nearest": lambda env, obs: nearest_action(env, rng),
     }
-    agent_policies, ckpt = make_agent_policies(depot_config, model_dir)
+    agent_policies, model_name = make_agent_policies(depot_config, run_dir)
     if agent_policies:
-        print(f"(agent loaded from '{ckpt}' checkpoint)")
+        print(f"(agent: {os.path.basename(run_dir)} / {model_name})")
         policies.update(agent_policies)
     else:
-        print(f"(no trained model in {model_dir}/ — skipping Agent rows)")
+        print(f"(no loadable model in {run_dir}/ — skipping Agent rows)")
 
     results = {name: evaluate(choose, depot_config, reward_config, args.episodes)
                for name, choose in policies.items()}

@@ -6,3 +6,4 @@ logs/*
 models/*
 !models/.gitkeep
 copy logs models/
+config copy.ini
