@@ -62,8 +62,12 @@ class TrainConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    # Small entropy bonus to keep exploring 
+    # Small entropy bonus to keep exploring
     ent_coef: float = 0.01
+    # Early-stop the epoch loop once the policy moves more than this KL from the old one.
+    # Main guard against the high-approx_kl / high-clip_fraction thrashing PPO falls into
+    # on long-episode, large-reward regimes. Set 0 to disable (-> None in train()).
+    target_kl: float = 0.03
     # Hidden layer sizes for both the policy and value MLP heads, comma-separated.
     net_arch: str = "256,256"
 
@@ -193,6 +197,7 @@ def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
         steps = target_total
         model = MaskablePPO(
             MaskableActorCriticPolicy, vec_env, policy_kwargs=policy_kwargs,
+            target_kl=(train_cfg.target_kl or None),   # 0 -> None (disabled)
             verbose=1, device=train_cfg.device, tensorboard_log=tb_log, **ppo_kwargs,
         )
 
