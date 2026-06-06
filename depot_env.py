@@ -234,7 +234,7 @@ class DepotEnv(gym.Env):
             _, bl, ba, r, h = decoded
             # Read the retrieved dwell BEFORE removal (the slot becomes -1 after)
             retrieved_dwell = int(self.grid[bl, ba, r, h])
-            dist, reshuffle_dists = self._apply_outbound(bl, ba, r, h)
+            dist, reshuffle_dists, _ = self._apply_outbound(bl, ba, r, h)
             reward, breakdown = self.reward_calc.compute_outbound_step(
                 retrieved_dwell, dist, reshuffle_dists
             )
@@ -375,13 +375,14 @@ class DepotEnv(gym.Env):
         self.crane_pos = new_pos
 
         # Relocate containers above the target
-        reshuffle_dists = self.reshuffler.relocate_above(bl, ba, r, h)
+        reshuffle_moves = self.reshuffler.relocate_above(bl, ba, r, h)
+        reshuffle_dists = [m[0] for m in reshuffle_moves]
 
         # Remove the target container
         self.grid[bl, ba, r, h] = -1
 
         self.n_out_remaining -= 1
-        return dist, reshuffle_dists
+        return dist, reshuffle_dists, reshuffle_moves
 
     def _advance_tick(self):
         """End-of-tick: age containers, increment tick, draw the next actionable demand."""

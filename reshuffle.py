@@ -23,20 +23,22 @@ class MinMaxReshuffler:
     def relocate_above(self, bl: int, ba: int, r: int, target_h: int) -> list:
         """
         Move all containers above target_h in stack (bl, ba, r) elsewhere.
-        Returns the per-relocation block distance |dest_block - src_block|
-        (0 = same block, 1 = adjacent, >=2 = farther) for scope-scaled penalties.
+        Returns a list of tuples (block_dist, src_bl, src_ba, src_r, src_h,
+        dest_bl, dest_ba, dest_r, dest_h) — one per relocated container.
+        block_dist = |dest_block - src_block| (0 same, 1 adjacent, >=2 farther).
         The number of relocations is simply len(result).
         """
-        block_dists = []
+        moves = []
         # Process top-down: move highest tier first
         h = self.env._stack_height(bl, ba, r) - 1
         while h > target_h:
             dwell = int(self.env.grid[bl, ba, r, h])
             dest = self._find_destination(bl, ba, r, dwell)
+            dest_h = self.env._stack_height(dest[0], dest[1], dest[2])
             self._move_container(bl, ba, r, h, dest, dwell)
-            block_dists.append(abs(dest[0] - bl))
+            moves.append((abs(dest[0] - bl), bl, ba, r, h, dest[0], dest[1], dest[2], dest_h))
             h -= 1
-        return block_dists
+        return moves
 
     # ─── Destination Selection ──────────────────────────────────────
 

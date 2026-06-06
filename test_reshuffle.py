@@ -115,7 +115,7 @@ def test_outbound_with_buried_target_triggers_reshuffle():
     env.grid[0, 0, 0, 1] = 2   # above
     env.grid[0, 0, 0, 2] = 3   # above
 
-    dist, _ = env._apply_outbound(0, 0, 0, 0)
+    dist, _, _moves = env._apply_outbound(0, 0, 0, 0)
 
     # Target should be gone
     assert env.grid[0, 0, 0, 0] == -1

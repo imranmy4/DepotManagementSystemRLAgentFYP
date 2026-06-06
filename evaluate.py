@@ -38,13 +38,15 @@ N_EPISODES = 50
 
 # Per-episode quantities collected by run_episode.
 METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
-               "reshuffles", "digs", "yard_dwell", "occ_ratio"]
+               "reshuffles", "digs", "yard_dwell", "occ_ratio",
+               "same_block", "adj_block", "far_block"]
 
 
 def _outbound_metrics(env, action):
     """Per-action operational metrics, read BEFORE the env steps (None if inbound).
 
     reshuffles = number of containers above the target that must be relocated.
+    delta_bl   = block distance between crane and target (0=same, 1=adj, >=2=far).
     """
     kind = env.decode_action(action)
     if kind[0] != "outbound":
@@ -53,7 +55,8 @@ def _outbound_metrics(env, action):
     height = int((env.grid[bl, ba, r, :] >= 0).sum())
     cb, cba, cr = env.crane_pos
     return {"dist": abs(bl - cb) + abs(ba - cba) + abs(r - cr),
-            "reshuffles": height - 1 - h}
+            "reshuffles": height - 1 - h,
+            "delta_bl": abs(bl - cb)}
 
 
 def _yard_mean_dwell(env):
@@ -66,6 +69,7 @@ def run_episode(env, choose_action, seed):
     obs, _ = env.reset(seed=seed)
     reward = crane_travel = reshuffles = 0.0
     n_in = n_out = n_dig = 0
+    n_same = n_adj = n_far = 0
     dwell_samples, occ_samples = [], []
     done = False
     while not done:
@@ -79,6 +83,13 @@ def run_episode(env, choose_action, seed):
             reshuffles += m["reshuffles"]
             if m["reshuffles"] > 0:
                 n_dig += 1
+            dbl = m["delta_bl"]
+            if dbl == 0:
+                n_same += 1
+            elif dbl == 1:
+                n_adj += 1
+            else:
+                n_far += 1
         else:                                  # an inbound placement
             n_in += 1
         dwell_samples.append(_yard_mean_dwell(env))
@@ -93,6 +104,9 @@ def run_episode(env, choose_action, seed):
         "digs": n_dig,
         "yard_dwell": float(np.mean(dwell_samples)) if dwell_samples else 0.0,
         "occ_ratio": float(np.mean(occ_samples)) if occ_samples else 0.0,
+        "same_block": n_same,
+        "adj_block": n_adj,
+        "far_block": n_far,
     }
 
 
@@ -114,13 +128,16 @@ def performance(res):
     ratios, so episodes with few retrievals don't distort them.
     """
     tot_out = res["outbound"].sum()
-    tot_out = tot_out if tot_out > 0 else 1.0   # guard against an all-inbound run
+    tot_out_safe = tot_out if tot_out > 0 else 1.0   # guard against an all-inbound run
     return {
-        "reshuffle%": 100.0 * res["reshuffles"].sum() / tot_out,
-        "dig_rate%":  100.0 * res["digs"].sum() / tot_out,
-        "travel/out": res["crane_travel"].sum() / tot_out,
+        "reshuffle%": 100.0 * res["reshuffles"].sum() / tot_out_safe,
+        "dig_rate%":  100.0 * res["digs"].sum() / tot_out_safe,
+        "travel/out": res["crane_travel"].sum() / tot_out_safe,
         "yard_dwell": float(res["yard_dwell"].mean()),
         "occ%":       100.0 * float(res["occ_ratio"].mean()),   # mean yard occupancy (context)
+        "same%":      100.0 * res["same_block"].sum() / tot_out_safe,
+        "adj%":       100.0 * res["adj_block"].sum() / tot_out_safe,
+        "far%":       100.0 * res["far_block"].sum() / tot_out_safe,
     }
 
 
@@ -215,6 +232,16 @@ def main():
     print("-" * len(header))
     for name, pv in perf.items():
         print(f"{name:<10}" + "".join(f"{pv[c]:>13.2f}" for c in perf_cols))
+
+    # Table 3 — retrieval block-distance breakdown
+    dist_cols = ["same%", "adj%", "far%"]
+    print("\nRETRIEVAL DISTANCE BREAKDOWN — % of outbound by crane block jump")
+    print("  same% = crane stays in same block   adj% = one block away   far% = 2+ blocks away")
+    header = f"{'policy':<10}" + "".join(f"{c:>10}" for c in dist_cols)
+    print(header)
+    print("-" * len(header))
+    for name, pv in perf.items():
+        print(f"{name:<10}" + "".join(f"{pv[c]:>10.1f}" for c in dist_cols))
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ def test_outbound_crane_distance():
     env.crane_pos = np.array([0, 0, 0], dtype=np.int32)
     env.grid[2, 1, 3, 0] = 5
 
-    dist, _ = env._apply_outbound(2, 1, 3, 0)
+    dist, _, _moves = env._apply_outbound(2, 1, 3, 0)
     assert dist == 2 + 1 + 3, f"Expected Manhattan distance 6, got {dist}"
     assert (env.crane_pos == [2, 1, 3]).all(), "Crane position should update"
     print("Outbound crane travel ✓")

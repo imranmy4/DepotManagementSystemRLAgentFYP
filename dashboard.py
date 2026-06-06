@@ -117,7 +117,7 @@ class DashboardRun:
         else:
             _, bl, ba, r, h = decoded
             retrieved = int(env.grid[bl, ba, r, h])      # read dwell BEFORE removal
-            dist, rd = env._apply_outbound(bl, ba, r, h)
+            dist, rd, reshuffle_moves = env._apply_outbound(bl, ba, r, h)
             reward, _ = env.reward_calc.compute_outbound_step(retrieved, dist, rd)
             self.total_reward += reward
             self.total_travel += dist
@@ -125,6 +125,12 @@ class DashboardRun:
             self.log.append(dict(tick=tick, op="outbound", coord=f"b{bl} y{ba} r{r} t{h}",
                                  reward=round(reward, 2), travel=dist,
                                  reshuffles=len(rd), dwell=retrieved))
+            for move in reshuffle_moves:
+                _, sb, sba, sr, sh, db, dba, dr, dh = move
+                self.log.append(dict(
+                    tick=tick, op="↳ reshuffle",
+                    coord=f"b{sb} y{sba} r{sr} t{sh}→b{db} y{dba} r{dr} t{dh}",
+                    reward=np.nan, travel=np.nan, reshuffles=np.nan, dwell=np.nan))
 
 
 # ──────────────────────────────────────────────────────────────────────────
