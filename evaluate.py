@@ -34,11 +34,11 @@ from train import EXPERIMENTS, resolve_config
 import configloader
 import runs
 
-N_EPISODES = 200
+N_EPISODES = 50
 
 # Per-episode quantities collected by run_episode.
 METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
-               "reshuffles", "digs", "yard_dwell"]
+               "reshuffles", "digs", "yard_dwell", "occ_ratio"]
 
 
 def _outbound_metrics(env, action):
@@ -66,7 +66,7 @@ def run_episode(env, choose_action, seed):
     obs, _ = env.reset(seed=seed)
     reward = crane_travel = reshuffles = 0.0
     n_in = n_out = n_dig = 0
-    dwell_samples = []
+    dwell_samples, occ_samples = [], []
     done = False
     while not done:
         action = choose_action(env, obs)
@@ -82,6 +82,7 @@ def run_episode(env, choose_action, seed):
         else:                                  # an inbound placement
             n_in += 1
         dwell_samples.append(_yard_mean_dwell(env))
+        occ_samples.append((env.grid >= 0).sum() / env.grid.size)
         done = term or trunc
     return {
         "reward": reward,
@@ -91,6 +92,7 @@ def run_episode(env, choose_action, seed):
         "reshuffles": reshuffles,
         "digs": n_dig,
         "yard_dwell": float(np.mean(dwell_samples)) if dwell_samples else 0.0,
+        "occ_ratio": float(np.mean(occ_samples)) if occ_samples else 0.0,
     }
 
 
@@ -118,6 +120,7 @@ def performance(res):
         "dig_rate%":  100.0 * res["digs"].sum() / tot_out,
         "travel/out": res["crane_travel"].sum() / tot_out,
         "yard_dwell": float(res["yard_dwell"].mean()),
+        "occ%":       100.0 * float(res["occ_ratio"].mean()),   # mean yard occupancy (context)
     }
 
 
@@ -202,10 +205,11 @@ def main():
 
     # Table 2 — pooled performance rates / averages
     perf = {name: performance(res) for name, res in results.items()}
-    perf_cols = ["reshuffle%", "dig_rate%", "travel/out", "yard_dwell"]
-    print("\nPERFORMANCE — pooled over all episodes (lower = better)")
+    perf_cols = ["reshuffle%", "dig_rate%", "travel/out", "yard_dwell", "occ%"]
+    print("\nPERFORMANCE — pooled over all episodes (lower = better; occ% is context only)")
     print("  reshuffle% = reshuffles/outbound   dig_rate% = retrievals needing a dig")
     print("  travel/out = avg crane dist/retrieval   yard_dwell = avg idle (ticks)")
+    print("  occ% = mean yard occupancy over the run (how full the yard ran)")
     header = f"{'policy':<10}" + "".join(f"{c:>13}" for c in perf_cols)
     print(header)
     print("-" * len(header))

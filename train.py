@@ -70,11 +70,12 @@ class TrainConfig:
     target_kl: float = 0.03
     # Hidden layer sizes for both the policy and value MLP heads, comma-separated.
     net_arch: str = "256,256"
+    vf_coef: float = 0.5   # value function loss coefficient (relative to policy loss)
 
 
 # Direct MaskablePPO constructor kwargs (net_arch is handled separately via policy_kwargs).
 PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
-            "gamma", "gae_lambda", "clip_range", "ent_coef"]
+            "gamma", "gae_lambda", "clip_range", "ent_coef", "vf_coef"]
 
 # Each experiment is a delta applied on top of the config.ini base. "full" = base.
 EXPERIMENTS = {
@@ -204,7 +205,7 @@ def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
     # Checkpoints + their VecNormalize stats, so any checkpoint (and an aborted run) is
     # evaluable/resumable on its own.
     checkpoint_cb = CheckpointCallback(
-        save_freq=max(50_000 // train_cfg.n_envs, 1),
+        save_freq=max(100_000 // train_cfg.n_envs, 1),
         save_path=run_dir,
         name_prefix="depot_ppo",
         save_vecnormalize=True,
@@ -224,7 +225,7 @@ def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
         eval_env,
         best_model_save_path=run_dir,
         log_path=run_dir,
-        eval_freq=max(25_000 // train_cfg.n_envs, 1),
+        eval_freq=max(100_000 // train_cfg.n_envs, 1),
         n_eval_episodes=20,
         deterministic=True,
         callback_on_new_best=save_best_vn,

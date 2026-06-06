@@ -15,6 +15,10 @@ class DepotConfig:
     n_ticks:  int = 30
     max_in:   int = 5
     max_out:  int = 5
+    # Fraction of yard capacity (0.0–1.0) to pre-fill at reset, spread flat across stacks.
+    # Applied in both training and evaluation (snapshotted in config_used.ini) so the
+    # regime is identical for fairness. 0.0 = start empty.
+    warmstart: float = 0.0
 
 
 class DepotEnv(gym.Env):
@@ -179,6 +183,8 @@ class DepotEnv(gym.Env):
         self.tick = 0
         self.crane_pos = np.array([0, 0, 0], dtype=np.int32)
 
+        self._warmstart_yard()  # optionally pre-fill the yard (config.warmstart)
+
         # Draw the first actionable tick's demand, skipping ticks with nothing to do
         while self.tick < self.config.n_ticks:
             self._draw_new_tick_demand()
@@ -187,6 +193,34 @@ class DepotEnv(gym.Env):
             self.tick += 1
 
         return self._get_obs(), {}
+
+    def _warmstart_yard(self):
+        """Pre-fill the yard flat to config.warmstart of capacity (0.0–1.0).
+
+        "Flat" = containers spread as evenly as possible across stacks (heights differ by
+        at most 1, the remainder placed on a random subset of stacks), filling bottom-up.
+        Pre-placed containers get random dwell ages in [0, n_ticks) so the staged yard
+        isn't a single uniform age. Uses self.np_random, so a given reset seed reproduces
+        the same warmstart for every policy (paired-fair in evaluation).
+        """
+        frac = min(1.0, max(0.0, float(self.config.warmstart)))
+        if frac <= 0.0:
+            return
+        capacity = self.grid.size
+        n_fill = min(capacity, int(round(frac * capacity)))
+        n_stacks = self.B * self.Ba * self.R
+
+        base, extra = divmod(n_fill, n_stacks)
+        heights = np.full(n_stacks, base, dtype=np.int32)
+        if extra:
+            heights[self.np_random.permutation(n_stacks)[:extra]] += 1
+        heights = heights.reshape(self.B, self.Ba, self.R)
+
+        tier = np.arange(self.H).reshape(1, 1, 1, self.H)
+        occupied = tier < heights[..., None]                       # (B, Ba, R, H)
+        # ages = self.np_random.integers(0, max(1, self.config.n_ticks), size=self.grid.shape)
+        ages = np.zeros(self.grid.shape, dtype=np.int32)  # start warmstart containers with 0 dwell for a cleaner initial state
+        self.grid = np.where(occupied, ages, -1).astype(np.int32)
 
     def step(self, action: int):
         decoded = self.decode_action(action)

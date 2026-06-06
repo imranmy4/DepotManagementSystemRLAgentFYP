@@ -68,7 +68,7 @@ class RewardCalculator:
         if len(occupied) == 0:
             return 0.0
         oldest = float(occupied.max())
-        return -self.config.w_burial * oldest
+        return -self.config.w_burial * (oldest + 1) # add 1 so penalty is nonzero even if oldest is 0 (new container)
 
     def height_penalty(self, bl: int, ba: int, r: int) -> float:
         """Penalty for placing onto an already-tall stack."""
