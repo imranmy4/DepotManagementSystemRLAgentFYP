@@ -199,7 +199,7 @@ def render_yard(env, show_numbers=True):
 
     # container cuboids — one Mesh3d per opacity bucket (Mesh3d opacity is per-trace)
     for bk, data in sorted(buckets.items()):
-        op = 0.30 + 0.70 * (bk / (N_OPACITY_BUCKETS - 1))
+        op = 0.25 + 0.40 * (bk / (N_OPACITY_BUCKETS - 1))
         verts = data["verts"]
         fig.add_trace(go.Mesh3d(
             x=[v[0] for v in verts], y=[v[1] for v in verts], z=[v[2] for v in verts],
@@ -211,7 +211,9 @@ def render_yard(env, show_numbers=True):
 
     if show_numbers and lx:
         fig.add_trace(go.Scatter3d(x=lx, y=ly, z=lz, mode="text", text=lt,
-                                   textfont=dict(size=9, color="black"), hoverinfo="skip"))
+                                   textfont=dict(size=14, color="white",
+                                                 family="Arial Black"),
+                                   hoverinfo="skip"))
 
     # crane indicator over its column
     cb, cba, cr = (int(v) for v in env.crane_pos)
