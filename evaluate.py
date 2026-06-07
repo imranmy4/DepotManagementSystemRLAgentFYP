@@ -177,8 +177,8 @@ def make_agent_policies(depot_config, run_dir):
             return int(np.asarray(action).reshape(-1)[0])
         return choose
 
-    return {"Agent": make(True), "Agent-sto": make(False)}, os.path.basename(model_path)
-
+#    return {"Agent": make(True), "Agent-sto": make(False)}, os.path.basename(model_path)
+    return {"Agent": make(True)}, os.path.basename(model_path)
 
 def main():
     ap = argparse.ArgumentParser(description="Compare the trained agent vs baselines.")
