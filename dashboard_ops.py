@@ -115,6 +115,7 @@ class LiveOrderRun:
         self.history: list[dict] = []
         self.total_reshuffles: int = 0
         self.total_travel: float = 0.0
+        self.total_reward: float = 0.0
         self.orders_done: int = 0
 
     # ── Agent ─────────────────────────────────────────────────────────────────
@@ -169,8 +170,10 @@ class LiveOrderRun:
             })
 
         ret_dwell = int(saved[bl, ba, r, h])
+        reshuffle_dists = [mv[0] for mv in moves]
         steps.append({
             "type": "retrieve", "pos": (bl, ba, r, h), "dwell": ret_dwell,
+            "reshuffle_dists": reshuffle_dists,
             "text": (f"Take container (dwell {ret_dwell} ticks) from  "
                      f"Block {bl+1} · Bay {ba+1} · Row {r+1} · Tier {h+1}"),
         })
@@ -183,6 +186,8 @@ class LiveOrderRun:
         if t == "inbound":
             bl, ba, r, h = step["pos"]
             self.env.grid[bl, ba, r, h] = 0
+            reward, _ = self.env.reward_calc.compute_inbound_step(bl, ba, r)
+            self.total_reward += reward
         elif t == "reshuffle":
             sb, sba, sr, sh = step["from"]
             db, dba, dr, dh = step["to"]
@@ -195,6 +200,9 @@ class LiveOrderRun:
             self.env.grid[bl, ba, r, h] = -1
             self.env.crane_pos = np.array([bl, ba, r], dtype=np.int32)
             self.total_travel += dist
+            reward, _ = self.env.reward_calc.compute_outbound_step(
+                step["dwell"], dist, step["reshuffle_dists"])
+            self.total_reward += reward
         self.history.append(step)
 
     def _flush(self):
@@ -205,11 +213,16 @@ class LiveOrderRun:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def advance_tick(self):
+        """Age all containers by one tick (called manually via the sidebar button)."""
+        self.env.grid[self.env.grid >= 0] += 1
+        self.env.tick += 1
+        self.total_reward += self.env.reward_calc.tick_penalty()
+
     def press_complete(self) -> bool:
         """Finish the current order (apply remaining steps) and start the next."""
         if self.step_idx >= 0:
             self._flush()
-            self.env.grid[self.env.grid >= 0] += 1   # age containers at order end
             self.orders_done += 1
 
         order_type = self._random_order_type()
@@ -295,7 +308,13 @@ def main():
 
     # Reset when experiment or warmstart level changes
     key = f"ops_{exp}_{warmstart}"
-    if st.sidebar.button("↺ Reset yard"):
+    st.sidebar.divider()
+    if st.sidebar.button("📅 Advance day", use_container_width=True,
+                         help="Age all containers by one tick"):
+        if key in st.session_state:
+            st.session_state[key].advance_tick()
+        st.rerun()
+    if st.sidebar.button("↺ Reset yard", use_container_width=True):
         st.session_state.pop(key, None)
         st.rerun()
 
@@ -307,12 +326,13 @@ def main():
     run: LiveOrderRun = st.session_state[key]
 
     # ── Metrics row ───────────────────────────────────────────────────────────
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Orders done", run.orders_done)
-    m2.metric("Reshuffles", run.total_reshuffles)
-    m3.metric("Crane travel", f"{run.total_travel:.0f}")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Day", run.env.tick)
+    m2.metric("Orders done", run.orders_done)
+    m3.metric("Reshuffles", run.total_reshuffles)
+    m4.metric("Crane travel", f"{run.total_travel:.0f}")
     occ = run.env._yard_occupancy()
-    m4.metric("Yard occ.", f"{100 * occ / run.env.grid.size:.0f}%")
+    m5.metric("Yard occ.", f"{100 * occ / run.env.grid.size:.0f}%")
 
     # ── Main layout ───────────────────────────────────────────────────────────
     left, right = st.columns([3, 2])
