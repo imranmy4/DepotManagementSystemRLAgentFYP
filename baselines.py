@@ -50,8 +50,7 @@ def nearest_action(env, rng):
     """Greedy crane travel: retrieve the nearest container; place on shortest stack."""
     valid = np.flatnonzero(env.action_masks())
     if env.mode == 1:  # outbound -> nearest to crane (min Manhattan)
-        cb, cba, cr = env.crane_pos
-        dists = [abs(bl - cb) + abs(ba - cba) + abs(r - cr)
+        dists = [env.crane_dist(env.crane_pos, (bl, ba, r))
                  for _, bl, ba, r, h in (env.decode_action(a) for a in valid)]
         return _pick_best(valid, dists, rng, maximize=False)
     return _shortest_stack_inbound(env, valid, rng)

@@ -53,10 +53,9 @@ def _outbound_metrics(env, action):
         return None
     _, bl, ba, r, h = kind
     height = int((env.grid[bl, ba, r, :] >= 0).sum())
-    cb, cba, cr = env.crane_pos
-    return {"dist": abs(bl - cb) + abs(ba - cba) + abs(r - cr),
+    return {"dist": env.crane_dist(env.crane_pos, (bl, ba, r)),
             "reshuffles": height - 1 - h,
-            "delta_bl": abs(bl - cb)}
+            "delta_bl": int(env.block_dist(bl, int(env.crane_pos[0])))}
 
 
 def _yard_mean_dwell(env):

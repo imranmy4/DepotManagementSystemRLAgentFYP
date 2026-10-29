@@ -147,7 +147,63 @@ def test_relocations_preserve_total_container_count():
     print("Total container count preserved (minus target) ✓")
 
 
+def test_adjacent_blocks_2x3_grid():
+    """6 blocks on a 2x3 grid (0 1 2 / 3 4 5): neighbours share a side."""
+    env = fresh_env(n_blocks=6, block_rows=2)
+    adj = lambda bl: set(env.reshuffler._adjacent_blocks(bl))
+    assert adj(0) == {1, 3}
+    assert adj(1) == {0, 2, 4}
+    assert adj(2) == {1, 5}
+    assert adj(4) == {1, 3, 5}
+    assert 3 not in adj(2), "Blocks 2 and 3 are at opposite ends, not adjacent"
+    print("2x3 grid adjacency ✓")
+
+
+def test_adjacent_blocks_line_layout_unchanged():
+    """block_rows=1 reproduces the old 1D bl-1 / bl+1 neighbours."""
+    env = fresh_env(n_blocks=6, block_rows=1)
+    for bl in range(6):
+        expected = {b for b in (bl - 1, bl + 1) if 0 <= b < 6}
+        assert set(env.reshuffler._adjacent_blocks(bl)) == expected
+        for other in range(6):
+            assert env.block_dist(bl, other) == abs(bl - other)
+    print("Line layout adjacency unchanged ✓")
+
+
+def test_vertical_neighbour_reshuffle_reports_distance_1():
+    """Spilling from block 1 into block 4 (vertical neighbour) reports block_dist 1."""
+    env = fresh_env(n_blocks=6, block_rows=2)
+    env.grid[1, 0, 0, 0] = 1   # target
+    env.grid[1, 0, 0, 1] = 5   # to relocate
+    # Block 1: every other stack holds a more urgent container (would bury)
+    for ba in range(env.Ba):
+        for r in range(env.R):
+            if (ba, r) != (0, 0):
+                env.grid[1, ba, r, 0] = 9
+    # Blocks 0 and 2 (other neighbours) also unusable; only block 4 has room
+    env.grid[0, :, :, 0] = 9
+    env.grid[2, :, :, 0] = 9
+
+    moves = env.reshuffler.relocate_above(1, 0, 0, 0)
+    assert len(moves) == 1
+    assert moves[0][5] == 4, f"Expected destination block 4, got {moves[0][5]}"
+    assert moves[0][0] == 1, f"Expected block_dist 1, got {moves[0][0]}"
+    print("Vertical neighbour reshuffle reports distance 1 ✓")
+
+
+def test_crane_dist_uses_block_grid():
+    env = fresh_env(n_blocks=6, block_rows=2)
+    assert env.crane_dist((1, 0, 0), (4, 0, 0)) == 1
+    assert env.crane_dist((2, 0, 0), (3, 0, 0)) == 3
+    assert env.crane_dist((0, 0, 0), (5, 3, 3)) == 3 + 3 + 3
+    print("Crane distance uses block grid ✓")
+
+
 if __name__ == "__main__":
+    test_adjacent_blocks_2x3_grid()
+    test_adjacent_blocks_line_layout_unchanged()
+    test_vertical_neighbour_reshuffle_reports_distance_1()
+    test_crane_dist_uses_block_grid()
     test_no_relocation_when_target_on_top()
     test_relocates_one_container()
     test_prefers_empty_stack()

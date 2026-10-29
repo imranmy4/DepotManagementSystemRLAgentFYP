@@ -47,8 +47,10 @@ class RewardCalculator:
         b_w = getattr(env.config, "block_weight", 1.0)
         ba_w = getattr(env.config, "bay_weight", 1.0)
         r_w = getattr(env.config, "row_weight", 1.0)
+        # Farthest block pair on the block grid: opposite corners.
+        max_block_dist = (env.config.block_rows - 1) + (env.block_cols - 1)
         self.max_dist = (
-            (env.B - 1) * b_w +
+            max_block_dist * b_w +
             (env.Ba - 1) * ba_w +
             (env.R - 1) * r_w
         )

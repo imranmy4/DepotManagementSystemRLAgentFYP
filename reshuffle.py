@@ -12,7 +12,8 @@ class MinMaxReshuffler:
       2. If no such stacks exist, pick the stack whose most urgent container
          has the lowest dwell (least harm).
 
-    Search scope: same block first, then adjacent blocks if no candidate found.
+    Search scope: same block first, then adjacent blocks (up/down/left/right on the
+    block grid) if no candidate found.
     """
 
     def __init__(self, env):
@@ -25,7 +26,8 @@ class MinMaxReshuffler:
         Move all containers above target_h in stack (bl, ba, r) elsewhere.
         Returns a list of tuples (block_dist, src_bl, src_ba, src_r, src_h,
         dest_bl, dest_ba, dest_r, dest_h) — one per relocated container.
-        block_dist = |dest_block - src_block| (0 same, 1 adjacent, >=2 farther).
+        block_dist = Manhattan distance between source and destination blocks on
+        the block grid (0 same, 1 adjacent, >=2 farther).
         The number of relocations is simply len(result).
         """
         moves = []
@@ -36,7 +38,7 @@ class MinMaxReshuffler:
             dest = self._find_destination(bl, ba, r, dwell)
             dest_h = self.env._stack_height(dest[0], dest[1], dest[2])
             self._move_container(bl, ba, r, h, dest, dwell)
-            moves.append((abs(dest[0] - bl), bl, ba, r, h, dest[0], dest[1], dest[2], dest_h))
+            moves.append((int(self.env.block_dist(bl, dest[0])), bl, ba, r, h, dest[0], dest[1], dest[2], dest_h))
             h -= 1
         return moves
 
@@ -118,12 +120,15 @@ class MinMaxReshuffler:
         return int(occupied.max())
 
     def _adjacent_blocks(self, bl):
-        """Return block indices adjacent to bl (bl-1 and bl+1 if valid)."""
+        """Return block indices sharing a side with bl on the block grid
+        (up, down, left, right — whichever exist)."""
+        rows, cols = self.env.config.block_rows, self.env.block_cols
+        row, col = self.env.block_coords(bl)
         adj = []
-        if bl > 0:
-            adj.append(bl - 1)
-        if bl < self.env.B - 1:
-            adj.append(bl + 1)
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                adj.append(nr * cols + nc)
         return adj
 
     def _move_container(self, src_bl, src_ba, src_r, src_h, dest, dwell):
