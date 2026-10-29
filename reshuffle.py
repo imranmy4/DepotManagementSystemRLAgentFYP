@@ -45,79 +45,67 @@ class MinMaxReshuffler:
     # ─── Destination Selection ──────────────────────────────────────
 
     def _find_destination(self, src_bl, src_ba, src_r, dwell):
+        # Per-stack summaries for the whole yard, computed once per relocation
+        # (vectorised; the grid changes after every move so they can't be cached longer).
+        open_, smax = self._stack_summaries(src_bl, src_ba, src_r)
+
         # Step 1: same block
-        dest = self._search_block(src_bl, src_bl, src_ba, src_r, dwell)
+        dest = self._search_block(src_bl, open_, smax, dwell)
         if dest is not None:
             return dest
 
         # Step 2: adjacent blocks
         for adj_bl in self._adjacent_blocks(src_bl):
-            dest = self._search_block(adj_bl, src_bl, src_ba, src_r, dwell)
+            dest = self._search_block(adj_bl, open_, smax, dwell)
             if dest is not None:
                 return dest
 
         # Step 3: fallback
-        return self._least_harmful_stack(src_bl, src_ba, src_r)
+        return self._least_harmful_stack(open_, smax)
 
-    def _search_block(self, bl, src_bl, src_ba, src_r, dwell):
+    def _stack_summaries(self, src_bl, src_ba, src_r):
         """
-        Search within block `bl` for a valid destination.
-        Skips the source stack (src_bl, src_ba, src_r) if it falls within this block.
+        open_: (B, Ba, R) bool — stack has a free tier and is not the source stack.
+        smax:  (B, Ba, R) float — max dwell in the stack, -inf if empty.
         """
-        candidates = []
-        for ba in range(self.env.Ba):
-            for r in range(self.env.R):
-                # Skip the source stack
-                if bl == src_bl and ba == src_ba and r == src_r:
-                    continue
+        grid = self.env.grid
+        heights = (grid >= 0).sum(axis=3)
+        open_ = heights < self.env.H
+        open_[src_bl, src_ba, src_r] = False
+        # Empty slots are -1 and dwell >= 0, so the raw max is the oldest container.
+        smax = grid.max(axis=3).astype(np.float64)
+        smax[heights == 0] = -np.inf
+        return open_, smax
 
-                h = self.env._stack_height(bl, ba, r)
-                if h >= self.env.H:
-                    continue
-
-                max_dwell = self._stack_max_dwell(bl, ba, r)
-                if max_dwell < dwell:
-                    candidates.append(((bl, ba, r), max_dwell))
-
-        if not candidates:
+    def _search_block(self, bl, open_, smax, dwell):
+        """
+        Search within block `bl` for a valid destination: an open stack with
+        max_dwell < dwell. Among those, pick the highest max_dwell (first in
+        (ba, r) order on ties). Returns None if no candidate.
+        """
+        block_smax = smax[bl].ravel()
+        idx = np.flatnonzero(open_[bl].ravel() & (block_smax < dwell))
+        if idx.size == 0:
             return None
+        best = int(idx[np.argmax(block_smax[idx])])
+        ba, r = divmod(best, self.env.R)
+        return (bl, ba, r)
 
-        best = max(candidates, key=lambda x: x[1])
-        return best[0]
-
-    def _least_harmful_stack(self, src_bl, src_ba, src_r):
+    def _least_harmful_stack(self, open_, smax):
         """
         Fallback when no valid candidate exists anywhere.
-        Pick stack with lowest max_dwell across whole yard.
+        Pick open stack with lowest max_dwell across whole yard (first in
+        (bl, ba, r) order on ties).
         """
-        best_stack = None
-        best_max = float("inf")
-        for bl in range(self.env.B):
-            for ba in range(self.env.Ba):
-                for r in range(self.env.R):
-                    if bl == src_bl and ba == src_ba and r == src_r:
-                        continue
-                    h = self.env._stack_height(bl, ba, r)
-                    if h >= self.env.H:
-                        continue
-                    max_dwell = self._stack_max_dwell(bl, ba, r)
-                    if max_dwell < best_max:
-                        best_max = max_dwell
-                        best_stack = (bl, ba, r)
-
-        if best_stack is None:
+        idx = np.flatnonzero(open_.ravel())
+        if idx.size == 0:
             raise RuntimeError("No valid reshuffle destination — yard is full")
-        return best_stack
+        best = int(idx[np.argmin(smax.ravel()[idx])])
+        bl, rem = divmod(best, self.env.Ba * self.env.R)
+        ba, r = divmod(rem, self.env.R)
+        return (bl, ba, r)
 
     # ─── Helpers ────────────────────────────────────────────────────
-
-    def _stack_max_dwell(self, bl, ba, r):
-        """Max dwell time in a stack, or -inf if empty."""
-        stack = self.env.grid[bl, ba, r, :]
-        occupied = stack[stack >= 0]
-        if len(occupied) == 0:
-            return float("-inf")
-        return int(occupied.max())
 
     def _adjacent_blocks(self, bl):
         """Return block indices sharing a side with bl on the block grid
