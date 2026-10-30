@@ -19,7 +19,7 @@ from train import EXPERIMENTS
 from evaluate import load_eval_config
 from dashboard import (
     load_agent, render_yard,
-    BLOCK_GAP, _CUBE_TRIS, _cube_corners,
+    slot_xy, _CUBE_TRIS, _cube_corners,
 )
 import runs
 
@@ -34,7 +34,6 @@ ORDER_ICON = {"inbound": "📦", "outbound": "🚢"}
 
 def _highlight_traces(env, orange=(), blue=(), red=()):
     """Return Mesh3d traces to overlay coloured boxes on specific (bl,ba,r,h) slots."""
-    Ba = env.Ba
     out = []
     for positions, color, opacity in [
         (orange, "orange", 0.80),
@@ -42,8 +41,8 @@ def _highlight_traces(env, orange=(), blue=(), red=()):
         (red,    "red",    0.80),
     ]:
         for bl, ba, r, h in positions:
-            cx = bl * (Ba + BLOCK_GAP) + ba
-            corners = _cube_corners(cx, r, h)
+            cx, cy = slot_xy(env, bl, ba, r)
+            corners = _cube_corners(cx, cy, h)
             out.append(go.Mesh3d(
                 x=[v[0] for v in corners],
                 y=[v[1] for v in corners],
