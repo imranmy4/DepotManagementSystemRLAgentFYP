@@ -11,7 +11,7 @@ env rewards for every policy. The agent is reported BOTH deterministic ('Agent',
 and stochastic ('Agent-sto', sampled) — a poorly-peaked policy scores very differently
 between the two.
 
-Two tables are printed:
+Four tables are printed:
   1. RAW — per-episode quantities (mean ± std): reward and the absolute per-episode
      counts/totals (inbound, outbound, crane travel, reshuffles).
   2. PERFORMANCE — pooled rates/averages (lower = better):
@@ -19,6 +19,8 @@ Two tables are printed:
         dig_rate%    share of retrievals that needed at least one reshuffle
         travel/out   average crane Manhattan distance per retrieval
         yard_dwell   time-averaged yard mean dwell (avg container idle, ticks)
+  3. RETRIEVAL DISTANCE BREAKDOWN — % of outbound by crane block jump.
+  4. YARD LAYOUT — time-averaged stack shape: full%, empty%, cliff%, height std.
 """
 import os
 import argparse
@@ -39,7 +41,8 @@ N_EPISODES = 50
 # Per-episode quantities collected by run_episode.
 METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
                "reshuffles", "digs", "yard_dwell", "occ_ratio",
-               "same_block", "adj_block", "far_block"]
+               "same_block", "adj_block", "far_block",
+               "full_stacks", "empty_stacks", "cliffs", "height_std"]
 
 
 def _outbound_metrics(env, action):
@@ -63,6 +66,19 @@ def _yard_mean_dwell(env):
     return float(occ.mean()) if occ.size else 0.0
 
 
+def _layout_metrics(env):
+    """Stack-shape snapshot: % stacks at max height, % empty stacks, % of in-block
+    neighbour pairs with a height gap > cliff_tol, and std of stack heights."""
+    h = (env.grid >= 0).sum(axis=3)                                  # (B, Ba, R)
+    gaps = np.concatenate([np.abs(np.diff(h, axis=1)).ravel(),       # bay neighbours
+                           np.abs(np.diff(h, axis=2)).ravel()])      # row neighbours
+    tol = env.reward_calc.config.cliff_tol
+    return {"full_stacks": 100.0 * (h == env.H).mean(),
+            "empty_stacks": 100.0 * (h == 0).mean(),
+            "cliffs": 100.0 * (gaps > tol).mean() if gaps.size else 0.0,
+            "height_std": float(h.std())}
+
+
 def run_episode(env, choose_action, seed):
     """choose_action(env, obs) -> action int. Returns this episode's metrics."""
     obs, _ = env.reset(seed=seed)
@@ -70,6 +86,7 @@ def run_episode(env, choose_action, seed):
     n_in = n_out = n_dig = 0
     n_same = n_adj = n_far = 0
     dwell_samples, occ_samples = [], []
+    layout_samples = []
     done = False
     while not done:
         action = choose_action(env, obs)
@@ -93,6 +110,7 @@ def run_episode(env, choose_action, seed):
             n_in += 1
         dwell_samples.append(_yard_mean_dwell(env))
         occ_samples.append((env.grid >= 0).sum() / env.grid.size)
+        layout_samples.append(_layout_metrics(env))
         done = term or trunc
     return {
         "reward": reward,
@@ -106,6 +124,8 @@ def run_episode(env, choose_action, seed):
         "same_block": n_same,
         "adj_block": n_adj,
         "far_block": n_far,
+        **{k: float(np.mean([s[k] for s in layout_samples])) if layout_samples else 0.0
+           for k in ("full_stacks", "empty_stacks", "cliffs", "height_std")},
     }
 
 
@@ -137,6 +157,10 @@ def performance(res):
         "same%":      100.0 * res["same_block"].sum() / tot_out_safe,
         "adj%":       100.0 * res["adj_block"].sum() / tot_out_safe,
         "far%":       100.0 * res["far_block"].sum() / tot_out_safe,
+        "full%":      float(res["full_stacks"].mean()),
+        "empty%":     float(res["empty_stacks"].mean()),
+        "cliff%":     float(res["cliffs"].mean()),
+        "h_std":      float(res["height_std"].mean()),
     }
 
 
@@ -241,6 +265,17 @@ def main():
     print("-" * len(header))
     for name, pv in perf.items():
         print(f"{name:<10}" + "".join(f"{pv[c]:>10.1f}" for c in dist_cols))
+
+    # Table 4 — yard layout / stability (time-averaged over every step)
+    layout_cols = ["full%", "empty%", "cliff%", "h_std"]
+    print("\nYARD LAYOUT — time-averaged stack shape (lower = more stable)")
+    print("  full% = stacks at max height   empty% = empty stacks")
+    print("  cliff% = in-block neighbour pairs with height gap > cliff_tol   h_std = std of stack heights")
+    header = f"{'policy':<10}" + "".join(f"{c:>10}" for c in layout_cols)
+    print(header)
+    print("-" * len(header))
+    for name, pv in perf.items():
+        print(f"{name:<10}" + "".join(f"{pv[c]:>10.2f}" for c in layout_cols))
 
 
 if __name__ == "__main__":

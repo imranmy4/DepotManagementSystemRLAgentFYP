@@ -10,6 +10,10 @@ class RewardConfig:
     # Inbound
     w_burial:            float = 0.5
     w_height:            float = 0.2
+    # Cap on the oldest dwell used by the burial penalty (0 = uncapped). Burying a
+    # container costs ~one future reshuffle regardless of its age; uncapped, burial grows
+    # with age and swamps the shape terms in a mature yard (fresh towers always win).
+    burial_cap:          float = 0.0
 
     # Outbound
     w_dwell:             float = 1.0
@@ -22,6 +26,16 @@ class RewardConfig:
     reshuffle_mult_same:     float = 1.0  # destination in the source block
     reshuffle_mult_adjacent: float = 2.0  # destination one block away
     reshuffle_mult_far:      float = 4.0  # destination >= 2 blocks away (yard-wide fallback)
+
+    # Stack shape / stability (both 0 = off, recovers the shape-blind reward).
+    # Cliff: penalise height gaps to in-block neighbours beyond cliff_tol tiers —
+    # towers on inbound, pits on outbound. Measured on the stack the agent touched.
+    w_cliff:             float = 0.0
+    cliff_tol:           int   = 1
+    # Profile: centre-heavy pyramid. A stack's height cap drops profile_step tiers per
+    # ring towards the block edge; inbound above the cap is penalised per excess tier.
+    w_profile:           float = 0.0
+    profile_step:        int   = 1
 
     # Per-tick (global)
     w_mean_idle:         float = 0.1
@@ -55,6 +69,7 @@ class RewardCalculator:
             (env.R - 1) * r_w
         )
         self.travel_threshold = max(1.0, self.max_dist / config.threshold_divisor)
+        self.profile_caps = profile_caps(env.Ba, env.R, env.H, config.profile_step)
 
     # ─── Per-step components ─────────────────────────────────────────
 
@@ -70,12 +85,38 @@ class RewardCalculator:
         if len(occupied) == 0:
             return 0.0
         oldest = float(occupied.max())
+        if self.config.burial_cap > 0:
+            oldest = min(oldest, self.config.burial_cap)
         return -self.config.w_burial * (oldest + 1) # add 1 so penalty is nonzero even if oldest is 0 (new container)
 
     def height_penalty(self, bl: int, ba: int, r: int) -> float:
         """Penalty for placing onto an already-tall stack."""
         h = int((self.env.grid[bl, ba, r, :] >= 0).sum())
         return -self.config.w_height * h
+
+    # ─── Shape components (evaluated on the post-action grid) ────────
+
+    def cliff_penalty(self, bl: int, ba: int, r: int, outbound: bool) -> float:
+        """Penalty for height gaps > cliff_tol between stack (bl, ba, r) and its in-block
+        neighbours. Inbound: the stack standing above its neighbours (tower).
+        Outbound: the stack sunk below its neighbours (pit)."""
+        if self.config.w_cliff == 0:
+            return 0.0
+        h = (self.env.grid[bl] >= 0).sum(axis=2)            # (Ba, R) heights in this block
+        hs = int(h[ba, r])
+        excess = 0
+        for nba, nr in ((ba - 1, r), (ba + 1, r), (ba, r - 1), (ba, r + 1)):
+            if 0 <= nba < self.env.Ba and 0 <= nr < self.env.R:
+                gap = hs - int(h[nba, nr]) if not outbound else int(h[nba, nr]) - hs
+                excess += max(0, gap - self.config.cliff_tol)
+        return -self.config.w_cliff * excess
+
+    def profile_penalty(self, bl: int, ba: int, r: int) -> float:
+        """Penalty per tier the stack exceeds its pyramid cap (inbound)."""
+        if self.config.w_profile == 0:
+            return 0.0
+        h = int((self.env.grid[bl, ba, r, :] >= 0).sum())
+        return -self.config.w_profile * max(0, h - int(self.profile_caps[ba, r]))
 
     # ─── Outbound components ─────────────────────────────────────────
 
@@ -144,14 +185,28 @@ class RewardCalculator:
             "action_bonus": self.action_bonus(),
             "burial":       self.burial_penalty(bl, ba, r),
             "height":       self.height_penalty(bl, ba, r),
+            "cliff":        self.cliff_penalty(bl, ba, r, outbound=False),
+            "profile":      self.profile_penalty(bl, ba, r),
         }
         return sum(breakdown.values()), breakdown
 
-    def compute_outbound_step(self, retrieved_dwell, dist, reshuffle_dists) -> tuple[float, dict]:
+    def compute_outbound_step(self, retrieved_dwell, dist, reshuffle_dists, stack) -> tuple[float, dict]:
+        """`stack` = (bl, ba, r) retrieved from; the cliff (pit) term is measured there."""
         breakdown = {
             "action_bonus": self.action_bonus(),
             "dwell":        self.dwell_reward(retrieved_dwell),
             "travel":       self.travel_reward(dist),
             "reshuffle":    self.reshuffle_penalty(reshuffle_dists),
+            "cliff":        self.cliff_penalty(*stack, outbound=True),
         }
         return sum(breakdown.values()), breakdown
+
+def profile_caps(Ba: int, R: int, H: int, step: int) -> np.ndarray:
+    """(Ba, R) pyramid height caps for one block: H in the innermost ring, dropping
+    `step` tiers per ring towards the edge (never below 1). Ring 0 = outer edge.
+    e.g. 4x4, H=6, step=1 -> outer 12 stacks cap 5, inner 2x2 cap 6."""
+    ba = np.arange(Ba).reshape(Ba, 1)
+    r = np.arange(R).reshape(1, R)
+    ring = np.minimum(np.minimum(ba, Ba - 1 - ba), np.minimum(r, R - 1 - r))
+    inner = (min(Ba, R) - 1) // 2
+    return np.maximum(1, H - step * (inner - ring))

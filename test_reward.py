@@ -159,7 +159,75 @@ def test_episode_bonus_applied_at_termination():
     print(f"Final step reward: {final_reward} ✓")
 
 
+def test_profile_caps_pyramid():
+    from reward import profile_caps
+    caps = profile_caps(4, 4, 6, 1)
+    assert caps[1:3, 1:3].tolist() == [[6, 6], [6, 6]], "Inner 2x2 capped at H"
+    assert caps[0, 0] == 5 and caps[0, 2] == 5 and caps[3, 1] == 5, "Edge ring capped at H-1"
+    assert (profile_caps(5, 5, 6, 1)[2, 2], profile_caps(5, 5, 6, 1)[0, 0]) == (6, 4)
+    print("Profile caps form a pyramid ✓")
+
+
+def test_cliff_penalty_tower_and_pit():
+    env = fresh_env(RewardConfig(w_cliff=1.0, cliff_tol=1))
+    env.grid[:] = -1
+    env.grid[0, 1, 1, :4] = 0        # tower of 4 in the middle of an empty block
+    # Inbound view: 4 neighbours each 4 tiers lower -> excess (4-1) each = 12
+    assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == -12.0
+    # Outbound view of a neighbour (height 0 next to the tower): pit excess 3
+    assert env.reward_calc.cliff_penalty(0, 0, 1, outbound=True) == -3.0
+    # Gap within tolerance costs nothing
+    env.grid[0, 1, 1, 1:] = -1       # tower now height 1
+    assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == 0.0
+    print("Cliff penalty: towers and pits ✓")
+
+
+def test_cliff_ignores_other_blocks():
+    env = fresh_env(RewardConfig(w_cliff=1.0, cliff_tol=0))
+    env.grid[:] = -1
+    env.grid[1, :, :, :] = 0         # block 1 full; block 0 empty
+    env.grid[0, 3, 0, 0] = 0         # edge stack of block 0, next to block 1 in index order
+    # Only in-block neighbours (all empty) count: 2 neighbours x gap 1
+    assert env.reward_calc.cliff_penalty(0, 3, 0, outbound=False) == -2.0
+    print("Cliff penalty is in-block only ✓")
+
+
+def test_profile_penalty_above_cap():
+    env = fresh_env(RewardConfig(w_profile=2.0, profile_step=1))
+    env.grid[:] = -1
+    env.grid[0, 0, 0, :] = 0         # edge stack at H=6, cap 5 -> 1 excess tier
+    env.grid[0, 1, 1, :] = 0         # centre stack at H=6, cap 6 -> fine
+    assert env.reward_calc.profile_penalty(0, 0, 0) == -2.0
+    assert env.reward_calc.profile_penalty(0, 1, 1) == 0.0
+    print("Profile penalty only above the cap ✓")
+
+
+def test_burial_cap_limits_penalty():
+    env = fresh_env(RewardConfig(w_burial=1.0, burial_cap=5))
+    env.grid[:] = -1
+    env.grid[0, 0, 0, 0] = 20
+    assert env.reward_calc.burial_penalty(0, 0, 0) == -6.0, "Capped at 5 -> -(5 + 1)"
+    env.grid[0, 0, 0, 0] = 3
+    assert env.reward_calc.burial_penalty(0, 0, 0) == -4.0, "Below the cap is unchanged"
+    print("Burial cap limits penalty ✓")
+
+
+def test_shape_terms_off_by_default():
+    env = fresh_env()
+    env.grid[:] = -1
+    env.grid[0, 0, 0, :] = 0
+    assert env.reward_calc.cliff_penalty(0, 0, 0, outbound=False) == 0.0
+    assert env.reward_calc.profile_penalty(0, 0, 0) == 0.0
+    print("Shape terms off with default weights ✓")
+
+
 if __name__ == "__main__":
+    test_profile_caps_pyramid()
+    test_cliff_penalty_tower_and_pit()
+    test_cliff_ignores_other_blocks()
+    test_profile_penalty_above_cap()
+    test_burial_cap_limits_penalty()
+    test_shape_terms_off_by_default()
     test_action_bonus_is_constant()
     test_burial_penalty_empty_stack_is_zero()
     test_burial_penalty_scales_with_oldest()
