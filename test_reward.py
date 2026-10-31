@@ -172,10 +172,10 @@ def test_cliff_penalty_tower_and_pit():
     env = fresh_env(RewardConfig(w_cliff=1.0, cliff_tol=1))
     env.grid[:] = -1
     env.grid[0, 1, 1, :4] = 0        # tower of 4 in the middle of an empty block
-    # Inbound view: 4 neighbours each 4 tiers lower -> excess (4-1) each = 12
-    assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == -12.0
-    # Outbound view of a neighbour (height 0 next to the tower): pit excess 3
-    assert env.reward_calc.cliff_penalty(0, 0, 1, outbound=True) == -3.0
+    # Inbound view: 4 neighbours each 4 tiers lower -> excess 3 each, mean 3
+    assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == -3.0
+    # Outbound view of an edge neighbour (3 neighbours, only the tower is taller): 3 / 3
+    assert env.reward_calc.cliff_penalty(0, 0, 1, outbound=True) == -1.0
     # Gap within tolerance costs nothing
     env.grid[0, 1, 1, 1:] = -1       # tower now height 1
     assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == 0.0
@@ -187,8 +187,8 @@ def test_cliff_ignores_other_blocks():
     env.grid[:] = -1
     env.grid[1, :, :, :] = 0         # block 1 full; block 0 empty
     env.grid[0, 3, 0, 0] = 0         # edge stack of block 0, next to block 1 in index order
-    # Only in-block neighbours (all empty) count: 2 neighbours x gap 1
-    assert env.reward_calc.cliff_penalty(0, 3, 0, outbound=False) == -2.0
+    # Only in-block neighbours (all empty) count: corner, 2 neighbours x gap 1, mean 1
+    assert env.reward_calc.cliff_penalty(0, 3, 0, outbound=False) == -1.0
     print("Cliff penalty is in-block only ✓")
 
 
@@ -200,6 +200,19 @@ def test_profile_penalty_above_cap():
     assert env.reward_calc.profile_penalty(0, 0, 0) == -2.0
     assert env.reward_calc.profile_penalty(0, 1, 1) == 0.0
     print("Profile penalty only above the cap ✓")
+
+
+def test_cliff_same_cost_corner_edge_centre():
+    """A stack 2 tiers above all its neighbours pays the same wherever it is."""
+    env = fresh_env(RewardConfig(w_cliff=15.0, cliff_tol=1))
+    costs = []
+    for s in [(0, 0), (0, 1), (1, 1)]:              # corner, edge, centre
+        env.grid[:] = -1
+        env.grid[0, :, :, :3] = 0                   # flat block at height 3
+        env.grid[0, s[0], s[1], :5] = 0             # this stack at height 5
+        costs.append(env.reward_calc.cliff_penalty(0, *s, outbound=False))
+    assert costs == [-15.0, -15.0, -15.0], costs
+    print("Cliff cost independent of position ✓")
 
 
 def test_burial_cap_limits_penalty():
@@ -234,6 +247,7 @@ if __name__ == "__main__":
     test_cliff_penalty_tower_and_pit()
     test_cliff_ignores_other_blocks()
     test_profile_penalty_above_cap()
+    test_cliff_same_cost_corner_edge_centre()
     test_burial_cap_limits_penalty()
     test_center_bonus_inner_ring_only()
     test_shape_terms_off_by_default()

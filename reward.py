@@ -29,7 +29,9 @@ class RewardConfig:
 
     # Stack shape / stability (both 0 = off, recovers the shape-blind reward).
     # Cliff: penalise height gaps to in-block neighbours beyond cliff_tol tiers —
-    # towers on inbound, pits on outbound. Measured on the stack the agent touched.
+    # towers on inbound, pits on outbound. Measured on the stack the agent touched, as the
+    # MEAN excess over its neighbours so centre (4), edge (3) and corner (2) stacks pay the
+    # same for the same steepness (a sum over neighbours biased placements to the edges).
     w_cliff:             float = 0.0
     cliff_tol:           int   = 1
     # Profile: centre-heavy pyramid. A stack's height cap drops profile_step tiers per
@@ -105,18 +107,19 @@ class RewardCalculator:
 
     def cliff_penalty(self, bl: int, ba: int, r: int, outbound: bool) -> float:
         """Penalty for height gaps > cliff_tol between stack (bl, ba, r) and its in-block
-        neighbours. Inbound: the stack standing above its neighbours (tower).
-        Outbound: the stack sunk below its neighbours (pit)."""
+        neighbours, averaged over the neighbours. Inbound: the stack standing above its
+        neighbours (tower). Outbound: the stack sunk below its neighbours (pit)."""
         if self.config.w_cliff == 0:
             return 0.0
         h = (self.env.grid[bl] >= 0).sum(axis=2)            # (Ba, R) heights in this block
         hs = int(h[ba, r])
-        excess = 0
+        excess, n_nb = 0, 0
         for nba, nr in ((ba - 1, r), (ba + 1, r), (ba, r - 1), (ba, r + 1)):
             if 0 <= nba < self.env.Ba and 0 <= nr < self.env.R:
                 gap = hs - int(h[nba, nr]) if not outbound else int(h[nba, nr]) - hs
                 excess += max(0, gap - self.config.cliff_tol)
-        return -self.config.w_cliff * excess
+                n_nb += 1
+        return -self.config.w_cliff * excess / n_nb if n_nb else 0.0
 
     def profile_penalty(self, bl: int, ba: int, r: int) -> float:
         """Penalty per tier the stack exceeds its pyramid cap (inbound)."""
