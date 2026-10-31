@@ -11,16 +11,12 @@ env rewards for every policy. The agent is reported BOTH deterministic ('Agent',
 and stochastic ('Agent-sto', sampled) — a poorly-peaked policy scores very differently
 between the two.
 
-Four tables are printed:
-  1. RAW — per-episode quantities (mean ± std): reward and the absolute per-episode
-     counts/totals (inbound, outbound, crane travel, reshuffles).
-  2. PERFORMANCE — pooled rates/averages (lower = better):
-        reshuffle%   total reshuffles / total outbound retrievals
-        dig_rate%    share of retrievals that needed at least one reshuffle
-        travel/out   average crane Manhattan distance per retrieval
-        yard_dwell   time-averaged yard mean dwell (avg container idle, ticks)
-  3. RETRIEVAL DISTANCE BREAKDOWN — % of outbound by crane block jump.
-  4. YARD LAYOUT — time-averaged stack shape: full%, empty%, cliff%, height std.
+Output:
+  1. SUMMARY — one row per policy (Random, FIFO, Nearest, Planner, Agent) with the headline
+     metrics; '*' marks the best value in each column.
+  2. AGENT vs BEST BASELINE — for each metric, the agent against whichever baseline did
+     best on it, with the % difference and a ✓/✗.
+  3. DETAILS — per-episode totals, retrieval block jumps, and yard shape.
 """
 import os
 import argparse
@@ -31,7 +27,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from depot_env import DepotEnv, DepotConfig
 from reward import RewardConfig
-from baselines import random_action, fifo_action, nearest_action
+from baselines import random_action, fifo_action, nearest_action, planner_action
 from train import EXPERIMENTS, resolve_config
 import configloader
 import runs
@@ -203,6 +199,69 @@ def make_agent_policies(depot_config, run_dir):
 #    return {"Agent": make(True), "Agent-sto": make(False)}, os.path.basename(model_path)
     return {"Agent": make(True)}, os.path.basename(model_path)
 
+# Headline metrics: (perf key, column label, unit/explanation, higher_is_better, fmt)
+SUMMARY_COLS = [
+    ("reward",     "Reward",       "total env reward per episode",              True,  "{:.0f}"),
+    ("reshuffle%", "Reshuffles",   "extra crane moves per 100 retrievals",      False, "{:.1f}"),
+    ("dig_rate%",  "Dig rate %",   "% of retrievals that needed digging",       False, "{:.1f}"),
+    ("travel/out", "Travel",       "crane distance per retrieval (bl+bay+row)", False, "{:.2f}"),
+    ("yard_dwell", "Idle ticks",   "avg time a container sits in the yard",     False, "{:.2f}"),
+    ("cliff%",     "Cliffs %",     "neighbour stacks > cliff_tol tiers apart",  False, "{:.1f}"),
+    ("full%",      "Full stacks %", "stacks at max height",                     False, "{:.1f}"),
+]
+BASELINES = ["Random", "FIFO", "Nearest", "Planner"]
+
+
+def _print_table(title, rows, cols, label_w=10, col_w=14):
+    """rows: {policy: {key: value}}; cols: [(key, label, higher_is_better, fmt)].
+    Marks the best policy in each column with '*'."""
+    print(f"\n{title}")
+    header = f"{'policy':<{label_w}}" + "".join(f"{lab:>{col_w}}" for _, lab, _, _ in cols)
+    print(header)
+    print("-" * len(header))
+    best = {}
+    for k, _, hib, _ in cols:
+        if hib is None:
+            continue
+        vals = [rows[p][k] for p in rows]
+        best[k] = max(vals) if hib else min(vals)
+    for name, vals in rows.items():
+        cells = []
+        for k, _, hib, fmt in cols:
+            txt = fmt.format(vals[k])
+            if hib is not None and np.isclose(vals[k], best[k]):
+                txt += "*"
+            else:
+                txt += " "
+            cells.append(f"{txt:>{col_w}}")
+        print(f"{name:<{label_w}}" + "".join(cells))
+
+
+def _verdict(perf, agent="Agent"):
+    """Plain-English comparison of the agent against the best baseline per metric."""
+    print("\nAGENT vs BEST BASELINE  (per metric, the baseline that did best on it)")
+    print("-" * 78)
+    wins = 0
+    names = [b for b in BASELINES if b in perf]
+    for k, lab, unit, hib, fmt in SUMMARY_COLS:
+        if k == "reward":
+            continue
+        best_b = (max if hib else min)(names, key=lambda b: perf[b][k])
+        a, b = perf[agent][k], perf[best_b][k]
+        better = a > b if hib else a < b
+        wins += better
+        if np.isclose(b, 0):
+            rel = "n/a"
+        else:
+            change = (a - b) / abs(b) * 100
+            word = ("higher" if change > 0 else "lower")
+            rel = f"{abs(change):.0f}% {word}"
+        mark = "✓ better" if better else ("= tie" if np.isclose(a, b) else "✗ worse ")
+        print(f"  {mark}  {lab:<14} Agent {fmt.format(a):>7} vs {best_b:<8} {fmt.format(b):>7}"
+              f"  ({rel})  — {unit}")
+    print(f"\n  Agent beats the best baseline on {wins} of {len(SUMMARY_COLS) - 1} operational metrics.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Compare the trained agent vs baselines.")
     ap.add_argument("experiment", nargs="?", default="tiny", choices=list(EXPERIMENTS))
@@ -219,63 +278,59 @@ def main():
         "Random":  lambda env, obs: random_action(env, rng),
         "FIFO":    lambda env, obs: fifo_action(env, rng),
         "Nearest": lambda env, obs: nearest_action(env, rng),
+        "Planner": lambda env, obs: planner_action(env, rng),
     }
     agent_policies, model_name = make_agent_policies(depot_config, run_dir)
     if agent_policies:
-        print(f"(agent: {os.path.basename(run_dir)} / {model_name})")
         policies.update(agent_policies)
-    else:
-        print(f"(no loadable model in {run_dir}/ — skipping Agent rows)")
 
     results = {name: evaluate(choose, depot_config, reward_config, args.episodes)
                for name, choose in policies.items()}
-
-    print(f"\nExperiment '{args.experiment}' — {args.episodes} episodes\n")
-
-    # Table 1 — raw per-episode quantities
-    raw_cols = [("reward", "reward ↑"), ("inbound", "inbound"), ("outbound", "outbound"),
-                ("crane_travel", "crane_travel ↓"), ("reshuffles", "reshuffles ↓")]
-    print("RAW — per episode (mean ± std)")
-    header = f"{'policy':<10}" + "".join(f"{lab:>16}" for _, lab in raw_cols)
-    print(header)
-    print("-" * len(header))
-    for name, res in results.items():
-        print(f"{name:<10}" + "".join(
-            f"{f'{res[k].mean():.1f}±{res[k].std():.1f}':>16}" for k, _ in raw_cols))
-
-    # Table 2 — pooled performance rates / averages
     perf = {name: performance(res) for name, res in results.items()}
-    perf_cols = ["reshuffle%", "dig_rate%", "travel/out", "yard_dwell", "occ%"]
-    print("\nPERFORMANCE — pooled over all episodes (lower = better; occ% is context only)")
-    print("  reshuffle% = reshuffles/outbound   dig_rate% = retrievals needing a dig")
-    print("  travel/out = avg crane dist/retrieval   yard_dwell = avg idle (ticks)")
-    print("  occ% = mean yard occupancy over the run (how full the yard ran)")
-    header = f"{'policy':<10}" + "".join(f"{c:>13}" for c in perf_cols)
-    print(header)
-    print("-" * len(header))
-    for name, pv in perf.items():
-        print(f"{name:<10}" + "".join(f"{pv[c]:>13.2f}" for c in perf_cols))
+    for name, res in results.items():
+        perf[name]["reward"] = float(res["reward"].mean())
 
-    # Table 3 — retrieval block-distance breakdown
-    dist_cols = ["same%", "adj%", "far%"]
-    print("\nRETRIEVAL DISTANCE BREAKDOWN — % of outbound by crane block jump")
-    print("  same% = crane stays in same block   adj% = one block away   far% = 2+ blocks away")
-    header = f"{'policy':<10}" + "".join(f"{c:>10}" for c in dist_cols)
-    print(header)
-    print("-" * len(header))
-    for name, pv in perf.items():
-        print(f"{name:<10}" + "".join(f"{pv[c]:>10.1f}" for c in dist_cols))
+    d = depot_config
+    print("=" * 78)
+    print(f"EVALUATION — experiment '{args.experiment}', {args.episodes} episodes "
+          f"(same demand for every policy)")
+    print(f"  run:   {os.path.basename(run_dir)} / "
+          f"{model_name or 'no model found — baselines only'}")
+    print(f"  yard:  {d.n_blocks} blocks ({d.block_rows}x{d.n_blocks // d.block_rows}) x "
+          f"{d.n_bays} bays x {d.n_rows} rows x {d.n_tiers} tiers, "
+          f"{d.n_ticks} ticks/episode, warmstart {d.warmstart:.0%}")
+    print(f"  mean occupancy: {next(iter(perf.values()))['occ%']:.0f}%  "
+          f"(identical for all policies — demand is fixed per seed)")
+    print("=" * 78)
 
-    # Table 4 — yard layout / stability (time-averaged over every step)
-    layout_cols = ["full%", "empty%", "cliff%", "h_std"]
-    print("\nYARD LAYOUT — time-averaged stack shape (lower = more stable)")
-    print("  full% = stacks at max height   empty% = empty stacks")
-    print("  cliff% = in-block neighbour pairs with height gap > cliff_tol   h_std = std of stack heights")
-    header = f"{'policy':<10}" + "".join(f"{c:>10}" for c in layout_cols)
-    print(header)
-    print("-" * len(header))
-    for name, pv in perf.items():
-        print(f"{name:<10}" + "".join(f"{pv[c]:>10.2f}" for c in layout_cols))
+    # 1 — headline summary
+    print("\nSUMMARY  (* = best in column; Reward ↑ higher is better, everything else ↓ lower)")
+    for _, lab, unit, _, _ in SUMMARY_COLS:
+        print(f"  {lab:<14} {unit}")
+    _print_table("", perf, [(k, lab, hib, fmt) for k, lab, _, hib, fmt in SUMMARY_COLS])
+    print("  Note: Reward is only comparable between policies in this table, not across runs"
+          "\n        with different reward settings. All other columns are physical and comparable.")
+
+    # 2 — verdict
+    if "Agent" in perf:
+        _verdict(perf)
+
+    # 3 — details
+    print("\n" + "=" * 78)
+    print("DETAILS")
+    raw = {name: {k: res[k].mean() for k in ("inbound", "outbound", "crane_travel", "reshuffles")}
+           for name, res in results.items()}
+    _print_table("Per-episode totals (mean over episodes)", raw,
+                 [("inbound", "inbound", None, "{:.0f}"), ("outbound", "outbound", None, "{:.0f}"),
+                  ("crane_travel", "crane travel", False, "{:.0f}"),
+                  ("reshuffles", "reshuffles", False, "{:.1f}")])
+    _print_table("Retrieval block jumps (% of retrievals: crane stays / 1 block / 2+ blocks)", perf,
+                 [("same%", "same block", None, "{:.1f}"), ("adj%", "adjacent", None, "{:.1f}"),
+                  ("far%", "far", None, "{:.1f}")])
+    _print_table("Yard shape (time-averaged)", perf,
+                 [("full%", "full %", False, "{:.1f}"), ("empty%", "empty %", False, "{:.1f}"),
+                  ("cliff%", "cliffs %", False, "{:.1f}"), ("h_std", "height std", False, "{:.2f}")])
+    print()
 
 
 if __name__ == "__main__":
