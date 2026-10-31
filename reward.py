@@ -36,6 +36,11 @@ class RewardConfig:
     # ring towards the block edge; inbound above the cap is penalised per excess tier.
     w_profile:           float = 0.0
     profile_step:        int   = 1
+    # Centre tie-breaker: small inbound bonus scaled by ring depth (0 at the block edge,
+    # w_center in the innermost ring). Kept well below w_height / w_burial / w_cliff so it
+    # only decides between otherwise-equal stacks (e.g. a flat block) — with cliff_tol=1
+    # this grows blocks layer by layer with the centre one tier ahead.
+    w_center:            float = 0.0
 
     # Per-tick (global)
     w_mean_idle:         float = 0.1
@@ -70,6 +75,8 @@ class RewardCalculator:
         )
         self.travel_threshold = max(1.0, self.max_dist / config.threshold_divisor)
         self.profile_caps = profile_caps(env.Ba, env.R, env.H, config.profile_step)
+        ring, inner = block_rings(env.Ba, env.R)
+        self.center_depth = ring / inner if inner > 0 else np.zeros_like(ring, dtype=float)
 
     # ─── Per-step components ─────────────────────────────────────────
 
@@ -117,6 +124,10 @@ class RewardCalculator:
             return 0.0
         h = int((self.env.grid[bl, ba, r, :] >= 0).sum())
         return -self.config.w_profile * max(0, h - int(self.profile_caps[ba, r]))
+
+    def center_bonus(self, ba: int, r: int) -> float:
+        """Small inbound bonus for centre stacks (tie-breaker), 0 on the block edge."""
+        return self.config.w_center * float(self.center_depth[ba, r])
 
     # ─── Outbound components ─────────────────────────────────────────
 
@@ -187,6 +198,7 @@ class RewardCalculator:
             "height":       self.height_penalty(bl, ba, r),
             "cliff":        self.cliff_penalty(bl, ba, r, outbound=False),
             "profile":      self.profile_penalty(bl, ba, r),
+            "center":       self.center_bonus(ba, r),
         }
         return sum(breakdown.values()), breakdown
 
@@ -205,8 +217,14 @@ def profile_caps(Ba: int, R: int, H: int, step: int) -> np.ndarray:
     """(Ba, R) pyramid height caps for one block: H in the innermost ring, dropping
     `step` tiers per ring towards the edge (never below 1). Ring 0 = outer edge.
     e.g. 4x4, H=6, step=1 -> outer 12 stacks cap 5, inner 2x2 cap 6."""
+    ring, inner = block_rings(Ba, R)
+    return np.maximum(1, H - step * (inner - ring))
+
+
+def block_rings(Ba: int, R: int):
+    """(Ba, R) ring index of each stack in a block (0 = outer edge) and the innermost
+    ring index. e.g. 4x4 -> outer 12 stacks ring 0, inner 2x2 ring 1."""
     ba = np.arange(Ba).reshape(Ba, 1)
     r = np.arange(R).reshape(1, R)
     ring = np.minimum(np.minimum(ba, Ba - 1 - ba), np.minimum(r, R - 1 - r))
-    inner = (min(Ba, R) - 1) // 2
-    return np.maximum(1, H - step * (inner - ring))
+    return ring, (min(Ba, R) - 1) // 2

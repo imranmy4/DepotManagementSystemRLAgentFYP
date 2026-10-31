@@ -212,6 +212,14 @@ def test_burial_cap_limits_penalty():
     print("Burial cap limits penalty ✓")
 
 
+def test_center_bonus_inner_ring_only():
+    env = fresh_env(RewardConfig(w_center=0.3))
+    assert env.reward_calc.center_bonus(1, 2) == 0.3, "Inner 2x2 gets the full bonus"
+    assert env.reward_calc.center_bonus(0, 0) == 0.0, "Corner gets nothing"
+    assert env.reward_calc.center_bonus(3, 1) == 0.0, "Edge gets nothing"
+    print("Centre bonus on inner ring only ✓")
+
+
 def test_shape_terms_off_by_default():
     env = fresh_env()
     env.grid[:] = -1
@@ -227,6 +235,7 @@ if __name__ == "__main__":
     test_cliff_ignores_other_blocks()
     test_profile_penalty_above_cap()
     test_burial_cap_limits_penalty()
+    test_center_bonus_inner_ring_only()
     test_shape_terms_off_by_default()
     test_action_bonus_is_constant()
     test_burial_penalty_empty_stack_is_zero()
