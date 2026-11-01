@@ -268,10 +268,15 @@ def main():
     ap.add_argument("--episodes", type=int, default=N_EPISODES)
     ap.add_argument("--run", default=None,
                     help="run id / path to evaluate (default: CURRENT pointer, else latest)")
+    # Scenario overrides on top of the run's saved depot config (stress tests), e.g.
+    #   --warmstart 0.8 --warmstart_aged true --max_in 12 --max_out 8
+    # Only change demand / initial-state fields; changing yard dimensions breaks the model.
+    configloader.add_cli_args(ap, DepotConfig)
     args = ap.parse_args()
 
     run_dir = runs.resolve_run_dir(args.experiment, args.run)
     depot_config, reward_config = load_eval_config(args.experiment, run_dir)
+    depot_config = configloader.apply_cli(depot_config, args)
 
     rng = np.random.default_rng(0)
     policies = {
@@ -298,7 +303,11 @@ def main():
           f"{model_name or 'no model found — baselines only'}")
     print(f"  yard:  {d.n_blocks} blocks ({d.block_rows}x{d.n_blocks // d.block_rows}) x "
           f"{d.n_bays} bays x {d.n_rows} rows x {d.n_tiers} tiers, "
-          f"{d.n_ticks} ticks/episode, warmstart {d.warmstart:.0%}")
+          f"{d.n_ticks} ticks/episode, warmstart {d.warmstart:.0%}"
+          f"{f'-{d.warmstart_max:.0%}' if d.warmstart_max > d.warmstart else ''}"
+          f"{f' (mixed ages p={d.warmstart_aged:g})' if d.warmstart_aged else ''}, "
+          f"demand in 0-{d.max_in} / out 0-{d.max_out} per tick"
+          f"{f' (±{d.demand_jitter} per episode)' if d.demand_jitter else ''}")
     print(f"  mean occupancy: {next(iter(perf.values()))['occ%']:.0f}%  "
           f"(identical for all policies — demand is fixed per seed)")
     print("=" * 78)
