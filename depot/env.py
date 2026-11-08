@@ -3,8 +3,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from dataclasses import dataclass
 
-from reward import RewardConfig, RewardCalculator
-from reshuffle import MinMaxReshuffler
+from depot.reward import RewardConfig, RewardCalculator
+from depot.reshuffle import MinMaxReshuffler
 
 @dataclass
 class DepotConfig:

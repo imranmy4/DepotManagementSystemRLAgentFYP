@@ -1,5 +1,5 @@
 from gymnasium.utils.env_checker import check_env
-from depot_env import DepotEnv, DepotConfig
+from depot.env import DepotEnv, DepotConfig
 
 
 import numpy as np

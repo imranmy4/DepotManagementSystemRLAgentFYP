@@ -1,6 +1,6 @@
 import numpy as np
-from depot_env import DepotEnv, DepotConfig
-from reward import RewardConfig, RewardCalculator
+from depot.env import DepotEnv, DepotConfig
+from depot.reward import RewardConfig, RewardCalculator
 
 
 def fresh_env(reward_config=None, **cfg):
@@ -160,7 +160,7 @@ def test_episode_bonus_applied_at_termination():
 
 
 def test_profile_caps_pyramid():
-    from reward import profile_caps
+    from depot.reward import profile_caps
     caps = profile_caps(4, 4, 6, 1)
     assert caps[1:3, 1:3].tolist() == [[6, 6], [6, 6]], "Inner 2x2 capped at H"
     assert caps[0, 0] == 5 and caps[0, 2] == 5 and caps[3, 1] == 5, "Edge ring capped at H-1"

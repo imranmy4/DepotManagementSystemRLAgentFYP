@@ -1,5 +1,5 @@
 import numpy as np
-from depot_env import DepotEnv, DepotConfig
+from depot.env import DepotEnv, DepotConfig
 
 
 def test_encode_decode_inbound_roundtrip():

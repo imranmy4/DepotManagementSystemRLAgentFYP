@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depot"
+version = "0.1.0"
+description = "Container depot RL agent — core env, reward, reshuffler, config and inference"
+requires-python = ">=3.10"
+# Core = what both training and deployment need (inference loads SB3 models).
+# requirements.txt remains the pinned lock of the full dev environment.
+dependencies = [
+    "numpy",
+    "gymnasium",
+    "torch",
+    "stable-baselines3",
+    "sb3-contrib",
+]
+
+[project.optional-dependencies]
+train = ["tensorboard", "tqdm", "rich", "pytest"]
+legacy = ["streamlit", "plotly", "pandas"]
+
+[tool.setuptools.packages.find]
+include = ["depot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
