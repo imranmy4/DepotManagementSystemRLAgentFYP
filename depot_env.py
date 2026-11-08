@@ -22,6 +22,15 @@ class DepotConfig:
     # Applied in both training and evaluation (snapshotted in config_used.ini) so the
     # regime is identical for fairness. 0.0 = start empty.
     warmstart: float = 0.0
+    # Per-episode variety (domain randomisation; all off by default = fixed conditions):
+    # warmstart_max > warmstart -> each episode's fill is drawn uniformly in that range.
+    warmstart_max: float = 0.0
+    # Probability an episode's warmstart uses random ages in [0, n_ticks) per slot (a messy,
+    # mixed-age yard) instead of all dwell 0 (uniform, already age-sorted). 1.0 = always.
+    warmstart_aged: float = 0.0
+    # Each episode shifts max_in and max_out independently by U{-j..j} (min 1), so the
+    # agent sees inbound-heavy and outbound-heavy periods.
+    demand_jitter: int = 0
 
 
 class DepotEnv(gym.Env):
@@ -189,7 +198,8 @@ class DepotEnv(gym.Env):
         self.tick = 0
         self.crane_pos = np.array([0, 0, 0], dtype=np.int32)
 
-        self._warmstart_yard()  # optionally pre-fill the yard (config.warmstart)
+        self._draw_episode_conditions()
+        self._warmstart_yard()  # optionally pre-fill the yard (episode warmstart)
 
         # Draw the first actionable tick's demand, skipping ticks with nothing to do
         while self.tick < self.config.n_ticks:
@@ -200,16 +210,31 @@ class DepotEnv(gym.Env):
 
         return self._get_obs(), {}
 
+    def _draw_episode_conditions(self):
+        """Per-episode demand caps, warmstart fill and age mode. Draws from np_random only
+        when randomisation is enabled, so fixed-condition seeds reproduce exactly."""
+        c, rng = self.config, self.np_random
+        self.ep_max_in, self.ep_max_out = c.max_in, c.max_out
+        if c.demand_jitter > 0:
+            j = c.demand_jitter
+            self.ep_max_in = max(1, c.max_in + int(rng.integers(-j, j + 1)))
+            self.ep_max_out = max(1, c.max_out + int(rng.integers(-j, j + 1)))
+        self.ep_warmstart = float(c.warmstart)
+        if c.warmstart_max > c.warmstart:
+            self.ep_warmstart = float(rng.uniform(c.warmstart, c.warmstart_max))
+        p = float(c.warmstart_aged)
+        self.ep_warmstart_aged = p >= 1.0 or (p > 0.0 and bool(rng.random() < p))
+
     def _warmstart_yard(self):
-        """Pre-fill the yard flat to config.warmstart of capacity (0.0–1.0).
+        """Pre-fill the yard flat to this episode's warmstart fraction (0.0–1.0).
 
         "Flat" = containers spread as evenly as possible across stacks (heights differ by
         at most 1, the remainder placed on a random subset of stacks), filling bottom-up.
-        Pre-placed containers get random dwell ages in [0, n_ticks) so the staged yard
-        isn't a single uniform age. Uses self.np_random, so a given reset seed reproduces
-        the same warmstart for every policy (paired-fair in evaluation).
+        Ages are all 0, or random in [0, n_ticks) per slot when this episode is "aged"
+        (see _draw_episode_conditions). Uses self.np_random, so a given reset seed
+        reproduces the same warmstart for every policy (paired-fair in evaluation).
         """
-        frac = min(1.0, max(0.0, float(self.config.warmstart)))
+        frac = min(1.0, max(0.0, self.ep_warmstart))
         if frac <= 0.0:
             return
         capacity = self.grid.size
@@ -224,8 +249,10 @@ class DepotEnv(gym.Env):
 
         tier = np.arange(self.H).reshape(1, 1, 1, self.H)
         occupied = tier < heights[..., None]                       # (B, Ba, R, H)
-        # ages = self.np_random.integers(0, max(1, self.config.n_ticks), size=self.grid.shape)
-        ages = np.zeros(self.grid.shape, dtype=np.int32)  # start warmstart containers with 0 dwell for a cleaner initial state
+        if self.ep_warmstart_aged:
+            ages = self.np_random.integers(0, max(1, self.config.n_ticks), size=self.grid.shape)
+        else:
+            ages = np.zeros(self.grid.shape, dtype=np.int32)  # all dwell 0: cleaner initial state
         self.grid = np.where(occupied, ages, -1).astype(np.int32)
 
     def step(self, action: int):
@@ -343,8 +370,8 @@ class DepotEnv(gym.Env):
 
     def _draw_new_tick_demand(self):
         """Sample inbound/outbound counts for a new tick."""
-        self.n_in_remaining  = int(self.np_random.integers(0, self.config.max_in + 1))
-        self.n_out_remaining = int(self.np_random.integers(0, self.config.max_out + 1))
+        self.n_in_remaining  = int(self.np_random.integers(0, self.ep_max_in + 1))
+        self.n_out_remaining = int(self.np_random.integers(0, self.ep_max_out + 1))
 
     def _resolve_mode(self) -> bool:
         """

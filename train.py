@@ -82,6 +82,17 @@ class TrainConfig:
 PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
             "gamma", "gae_lambda", "clip_range", "ent_coef", "vf_coef"]
 
+# Varied conditions per episode: fill 30-85%, half the episodes start from a messy
+# mixed-age yard, inbound/outbound caps each shifted by up to ±3.
+ROBUST_DEPOT = dict(warmstart=0.3, warmstart_max=0.85, warmstart_aged=0.5, demand_jitter=3)
+
+# Lean reward: drop terms that overlap with others. Kept: reshuffle (scope-scaled), burial
+# (capped), dwell on retrieval + per-tick mean idle, cliff, and a linear travel penalty
+# (threshold_divisor=100 makes the threshold 1, so every move costs -w_travel*dist and the
+# short-move compensation never applies).
+LEAN_REWARD = dict(w_height=0.0, w_profile=0.0, w_center=0.0, w_max_idle=0.0,
+                   w_travel_compensate=0.0, threshold_divisor=100)
+
 # Each experiment is a delta applied on top of the config.ini base. "full" = base.
 EXPERIMENTS = {
     "full": {},
@@ -103,6 +114,10 @@ EXPERIMENTS = {
     "abl_reshuffle_heavy": {"reward": dict(w_reshuffle=2.0)},
     "abl_shape_off":       {"reward": dict(w_cliff=0.0, w_profile=0.0, w_center=0.0)},
     "abl_center_off":      {"reward": dict(w_center=0.0)},
+
+    # Robust training on varied conditions, with the full reward and with the lean reward.
+    "robust":      {"depot": ROBUST_DEPOT},
+    "robust_lean": {"depot": ROBUST_DEPOT, "reward": LEAN_REWARD},
     "abl_burial_uncapped": {"reward": dict(burial_cap=0.0)},
 }
 

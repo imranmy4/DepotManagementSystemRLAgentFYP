@@ -4,8 +4,10 @@ from dataclasses import dataclass
 
 @dataclass
 class RewardConfig:
-    # Per-step engagement
-    w_action_bonus:      float = 0.1
+    # DEPRECATED (default 0, kept only so old run snapshots still load): a constant per
+    # step — the number of steps per episode is fixed by demand, so it never changes a
+    # decision. Same for w_episode_bonus (fixed episode length) and w_full_drop (never wired).
+    w_action_bonus:      float = 0.0
 
     # Inbound
     w_burial:            float = 0.5
@@ -49,10 +51,10 @@ class RewardConfig:
     w_max_idle:          float = 0.2
 
     # Per-episode
-    w_episode_bonus:     float = 10.0
+    w_episode_bonus:     float = 0.0    # DEPRECATED, see w_action_bonus
 
     # Edge case
-    w_full_drop:         float = 50.0
+    w_full_drop:         float = 0.0    # DEPRECATED, never applied
 
 
 class RewardCalculator:
