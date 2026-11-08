@@ -1,9 +1,4 @@
-"""Load a trained run and pick actions with it — the one place that knows how.
-
-A run is only usable as a bundle: model + its VecNormalize stats + the config it was trained
-with (the observation layout depends on the yard dimensions). Policy.load resolves all three
-from the run folder, so callers (evaluation, the API) never load a model without its
-normalizer.
+"""Load a trained run (model, VecNormalize stats, config) and pick actions with it.
 
     policy = Policy.load("full")               # CURRENT run of an experiment
     policy = Policy.load("full", run="run_…")  # a specific run (id or path)

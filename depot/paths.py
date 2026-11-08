@@ -1,8 +1,4 @@
-"""Repo-root-anchored paths, so scripts work from any working directory.
-
-Each can be overridden by an environment variable (e.g. inside a Docker container
-where models are mounted elsewhere).
-"""
+"""Repo-root-anchored paths, each overridable by an environment variable."""
 import os
 from pathlib import Path
 

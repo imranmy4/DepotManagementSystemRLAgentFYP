@@ -1,4 +1,4 @@
-"""Per-run model folder layout + resolution — shared by training/ and deploy/, so they all agree on where a run's artifacts live and which is "current".
+"""Per-run model folder layout and run/model resolution.
 
 Layout:
     models/<exp>/

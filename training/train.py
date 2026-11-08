@@ -11,9 +11,6 @@ apply deltas on top of that base, and any field can be overridden on the CLI.
 Precedence: dataclass defaults < config.ini < experiment delta < CLI override.
 The resolved config is snapshotted to models/<name>/config_used.ini so evaluation
 always uses the exact config a model was trained with.
-
-Ablations that need env/reward/reshuffle code changes (state composition, travel
-scope, MinMax priority, corridor scope, warmstart) are NOT here yet — see CLAUDE.md.
 """
 import os
 import argparse

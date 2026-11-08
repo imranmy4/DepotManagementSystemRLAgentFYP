@@ -1,8 +1,5 @@
 """Config: INI file <-> dataclasses <-> CLI overrides, plus the named experiments.
 
-Shared by training/ (to build a run's config) and deploy/ (to rebuild the env exactly as a
-run was trained, from its config_used.ini snapshot).
-
 The dataclasses (DepotConfig, RewardConfig, TrainConfig) are the single source of
 truth for field names, types, and defaults. This module just moves values between
 them, a config.ini, and argparse — it hardcodes no field names itself.

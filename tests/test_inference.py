@@ -1,7 +1,4 @@
-"""depot.inference.Policy loads a run bundle (model + normalizer + config) and acts validly.
-
-Builds a throwaway untrained run in a temp dir, so it doesn't depend on models/.
-"""
+"""Tests for depot.inference.Policy loading a run and acting within the mask."""
 import os
 
 import numpy as np

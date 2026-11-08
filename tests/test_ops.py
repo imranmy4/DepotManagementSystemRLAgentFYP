@@ -1,4 +1,4 @@
-"""depot.ops.LiveOrderRun: orders become valid instruction steps that keep the grid consistent."""
+"""Tests for depot.ops.LiveOrderRun step planning and application."""
 import numpy as np
 
 from depot.env import DepotConfig
@@ -9,7 +9,7 @@ CFG = DepotConfig(n_blocks=2, block_rows=1, n_bays=2, n_rows=2, n_tiers=3, n_tic
 
 
 class _FirstValid:
-    """Stand-in policy: first valid action (deterministic, no model needed)."""
+    """Policy stub returning the first valid action."""
     def act(self, env, obs=None, deterministic=True):
         return int(np.flatnonzero(env.action_masks())[0])
 
