@@ -1,5 +1,6 @@
 .venv
 CLAUDE.md
+CLAUDE_LEGACY.md
 __pycache__/
 *.egg-info/
 .pytest_cache/
