@@ -17,9 +17,16 @@ Output:
   2. AGENT vs BEST BASELINE — for each metric, the agent against whichever baseline did
      best on it, with the % difference and a ✓/✗.
   3. DETAILS — per-episode totals, retrieval block jumps, and yard shape.
+
+With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 30/50/70/85%,
+new vs mixed-age pre-fill, inbound/outbound-heavy demand), printing a summary table per
+scenario, overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
+    python evaluate.py robust_lean --stress
 """
 import os
+import sys
 import argparse
+import dataclasses
 import numpy as np
 
 from sb3_contrib import MaskablePPO
@@ -262,14 +269,121 @@ def _verdict(perf, agent="Agent"):
     print(f"\n  Agent beats the best baseline on {wins} of {len(SUMMARY_COLS) - 1} operational metrics.")
 
 
+# Stress grid: fixed conditions (per-episode randomisation off), every policy, same seeds.
+STRESS_SCENARIOS = [
+    ("30% new",                dict(warmstart=0.3)),
+    ("30% mixed",              dict(warmstart=0.3, warmstart_aged=1.0)),
+    ("50% new",                dict(warmstart=0.5)),
+    ("50% mixed",              dict(warmstart=0.5, warmstart_aged=1.0)),
+    ("70% new",                dict(warmstart=0.7)),
+    ("70% mixed",              dict(warmstart=0.7, warmstart_aged=1.0)),
+    ("85% new",                dict(warmstart=0.85)),
+    ("85% mixed",              dict(warmstart=0.85, warmstart_aged=1.0)),
+    ("50% mixed, in-heavy",    dict(warmstart=0.5, warmstart_aged=1.0, max_in=12, max_out=8)),
+    ("50% mixed, out-heavy",   dict(warmstart=0.5, warmstart_aged=1.0, max_in=8, max_out=12)),
+]
+STRESS_N_EPISODES = 30
+
+
+def _baseline_policies():
+    """Fresh baseline policies with a fixed tie-break RNG (recreate per scenario)."""
+    rng = np.random.default_rng(0)
+    return {
+        "Random":  lambda env, obs: random_action(env, rng),
+        "FIFO":    lambda env, obs: fifo_action(env, rng),
+        "Nearest": lambda env, obs: nearest_action(env, rng),
+        "Planner": lambda env, obs: planner_action(env, rng),
+    }
+
+
+def _run_all(policies, depot_config, reward_config, n_episodes):
+    """Evaluate every policy; return (raw results, perf incl. mean reward)."""
+    results = {name: evaluate(choose, depot_config, reward_config, n_episodes)
+               for name, choose in policies.items()}
+    perf = {name: performance(res) for name, res in results.items()}
+    for name, res in results.items():
+        perf[name]["reward"] = float(res["reward"].mean())
+    return results, perf
+
+
+def _describe_yard(d):
+    return (f"{d.n_blocks} blocks ({d.block_rows}x{d.n_blocks // d.block_rows}) x "
+            f"{d.n_bays} bays x {d.n_rows} rows x {d.n_tiers} tiers, "
+            f"{d.n_ticks} ticks/episode")
+
+
+def _print_matrix(title, scen_perf, key, fmt, higher_is_better):
+    """Rows = scenarios, columns = policies; '*' marks the best policy in each row."""
+    names = list(next(iter(scen_perf.values())).keys())
+    print(f"\n{title}")
+    header = f"{'scenario':<22}" + "".join(f"{n:>11}" for n in names)
+    print(header)
+    print("-" * len(header))
+    for scen, perf in scen_perf.items():
+        vals = [perf[n][key] for n in names]
+        best = max(vals) if higher_is_better else min(vals)
+        cells = "".join(f"{fmt.format(v) + ('*' if np.isclose(v, best) else ' '):>11}" for v in vals)
+        print(f"{scen:<22}" + cells)
+
+
+def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model_name):
+    n = args.episodes or STRESS_N_EPISODES
+    fixed = dataclasses.replace(depot_config, warmstart_max=0.0, warmstart_aged=0.0,
+                                demand_jitter=0)
+    print("=" * 78)
+    print(f"STRESS TEST — experiment '{args.experiment}', {len(STRESS_SCENARIOS)} scenarios x "
+          f"{n} episodes (same demand for every policy within a scenario)")
+    print(f"  run:   {os.path.basename(run_dir)} / "
+          f"{model_name or 'no model found — baselines only'}")
+    print(f"  yard:  {_describe_yard(fixed)}; base demand in 0-{fixed.max_in} / "
+          f"out 0-{fixed.max_out} per tick")
+    print("  'new' = pre-filled containers all age 0 (an already age-sorted yard);")
+    print("  'mixed' = random ages (a messy yard). in/out-heavy = demand caps 12/8 and 8/12.")
+    print("=" * 78)
+
+    scen_perf = {}
+    cols = [(k, lab, hib, fmt) for k, lab, _, hib, fmt in SUMMARY_COLS]
+    for i, (name, delta) in enumerate(STRESS_SCENARIOS, 1):
+        depot = dataclasses.replace(fixed, **delta)
+        policies = {**_baseline_policies(), **agent_policies}
+        _, perf = _run_all(policies, depot, reward_config, n)
+        scen_perf[name] = perf
+        _print_table(f"[{i}/{len(STRESS_SCENARIOS)}] {name}  "
+                     f"(mean occupancy {next(iter(perf.values()))['occ%']:.0f}%)", perf, cols)
+        sys.stdout.flush()
+
+    print("\n" + "=" * 78)
+    print("OVERVIEW — every scenario at a glance (* = best policy in the row)")
+    for key, lab, unit, hib, fmt in SUMMARY_COLS:
+        if key == "reward":
+            continue
+        arrow = "higher" if hib else "lower"
+        _print_matrix(f"{lab} — {unit} ({arrow} is better)", scen_perf, key, fmt, hib)
+
+    if "Agent" in agent_policies:
+        print("\nAGENT vs PLANNER — metrics where the agent is better, per scenario")
+        print("-" * 78)
+        metrics = [(k, lab, hib) for k, lab, _, hib, _ in SUMMARY_COLS if k != "reward"]
+        for scen, perf in scen_perf.items():
+            a, p = perf["Agent"], perf["Planner"]
+            wins = [lab for k, lab, hib in metrics
+                    if not np.isclose(a[k], p[k]) and ((a[k] > p[k]) if hib else (a[k] < p[k]))]
+            print(f"  {scen:<22} {len(wins)}/{len(metrics)}  {', '.join(wins) if wins else '—'}")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Compare the trained agent vs baselines.")
     ap.add_argument("experiment", nargs="?", default="tiny", choices=list(EXPERIMENTS))
-    ap.add_argument("--episodes", type=int, default=N_EPISODES)
+    ap.add_argument("--episodes", type=int, default=None,
+                    help=f"episodes per evaluation (default {N_EPISODES}; "
+                         f"{STRESS_N_EPISODES} per scenario with --stress)")
     ap.add_argument("--run", default=None,
                     help="run id / path to evaluate (default: CURRENT pointer, else latest)")
+    ap.add_argument("--stress", action="store_true",
+                    help="evaluate over a grid of yard fill levels / age mixes / demand balance")
     # Scenario overrides on top of the run's saved depot config (stress tests), e.g.
-    #   --warmstart 0.8 --warmstart_aged true --max_in 12 --max_out 8
+    #   --warmstart 0.8 --warmstart_aged 1 --max_in 12 --max_out 8
     # Only change demand / initial-state fields; changing yard dimensions breaks the model.
     configloader.add_cli_args(ap, DepotConfig)
     args = ap.parse_args()
@@ -277,33 +391,23 @@ def main():
     run_dir = runs.resolve_run_dir(args.experiment, args.run)
     depot_config, reward_config = load_eval_config(args.experiment, run_dir)
     depot_config = configloader.apply_cli(depot_config, args)
-
-    rng = np.random.default_rng(0)
-    policies = {
-        "Random":  lambda env, obs: random_action(env, rng),
-        "FIFO":    lambda env, obs: fifo_action(env, rng),
-        "Nearest": lambda env, obs: nearest_action(env, rng),
-        "Planner": lambda env, obs: planner_action(env, rng),
-    }
     agent_policies, model_name = make_agent_policies(depot_config, run_dir)
-    if agent_policies:
-        policies.update(agent_policies)
 
-    results = {name: evaluate(choose, depot_config, reward_config, args.episodes)
-               for name, choose in policies.items()}
-    perf = {name: performance(res) for name, res in results.items()}
-    for name, res in results.items():
-        perf[name]["reward"] = float(res["reward"].mean())
+    if args.stress:
+        run_stress(args, run_dir, depot_config, reward_config, agent_policies, model_name)
+        return
+
+    n = args.episodes or N_EPISODES
+    policies = {**_baseline_policies(), **agent_policies}
+    results, perf = _run_all(policies, depot_config, reward_config, n)
 
     d = depot_config
     print("=" * 78)
-    print(f"EVALUATION — experiment '{args.experiment}', {args.episodes} episodes "
+    print(f"EVALUATION — experiment '{args.experiment}', {n} episodes "
           f"(same demand for every policy)")
     print(f"  run:   {os.path.basename(run_dir)} / "
           f"{model_name or 'no model found — baselines only'}")
-    print(f"  yard:  {d.n_blocks} blocks ({d.block_rows}x{d.n_blocks // d.block_rows}) x "
-          f"{d.n_bays} bays x {d.n_rows} rows x {d.n_tiers} tiers, "
-          f"{d.n_ticks} ticks/episode, warmstart {d.warmstart:.0%}"
+    print(f"  yard:  {_describe_yard(d)}, warmstart {d.warmstart:.0%}"
           f"{f'-{d.warmstart_max:.0%}' if d.warmstart_max > d.warmstart else ''}"
           f"{f' (mixed ages p={d.warmstart_aged:g})' if d.warmstart_aged else ''}, "
           f"demand in 0-{d.max_in} / out 0-{d.max_out} per tick"
