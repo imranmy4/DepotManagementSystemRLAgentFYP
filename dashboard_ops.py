@@ -196,7 +196,7 @@ class LiveOrderRun:
             self.total_reshuffles += 1
         elif t == "retrieve":
             bl, ba, r, h = step["pos"]
-            dist = int(np.abs(self.env.crane_pos - np.array([bl, ba, r])).sum())
+            dist = self.env.crane_dist(self.env.crane_pos, (bl, ba, r))
             self.env.grid[bl, ba, r, h] = -1
             self.env.crane_pos = np.array([bl, ba, r], dtype=np.int32)
             self.total_travel += dist

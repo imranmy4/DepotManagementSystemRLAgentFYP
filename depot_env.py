@@ -9,6 +9,9 @@ from reshuffle import MinMaxReshuffler
 @dataclass
 class DepotConfig:
     n_blocks: int = 6
+    # Blocks are laid out row-major on a block_rows × (n_blocks // block_rows) grid,
+    # e.g. 6 blocks, 2 rows -> 0 1 2 / 3 4 5. block_rows = 1 is the old 1D line layout.
+    block_rows: int = 2
     n_bays:   int = 4
     n_rows:   int = 4
     n_tiers:  int = 6
@@ -31,6 +34,9 @@ class DepotEnv(gym.Env):
 
         # Shorthand
         self.B, self.Ba, self.R, self.H = c.n_blocks, c.n_bays, c.n_rows, c.n_tiers
+        assert c.block_rows >= 1 and self.B % c.block_rows == 0, \
+            f"n_blocks={self.B} not divisible by block_rows={c.block_rows}"
+        self.block_cols = self.B // c.block_rows
 
         # Action space sizes
         self.n_inbound  = self.B * self.Ba * self.R
@@ -106,7 +112,7 @@ class DepotEnv(gym.Env):
         ba_idx = np.arange(self.Ba).reshape(1, self.Ba, 1)
         r_idx  = np.arange(self.R).reshape(1, 1, self.R)
         dist_to_cr = (
-            np.abs(bl_idx - self.crane_pos[0])
+            self.block_dist(bl_idx, self.crane_pos[0])
             + np.abs(ba_idx - self.crane_pos[1])
             + np.abs(r_idx - self.crane_pos[2])
         ).astype(np.float32)  # (B, Ba, R)
@@ -307,6 +313,22 @@ class DepotEnv(gym.Env):
     
     # ─── Utilities ──────────────────────────────────────────────────
 
+    def block_coords(self, bl):
+        """(row, col) of block `bl` on the block grid (row-major numbering)."""
+        return bl // self.block_cols, bl % self.block_cols
+
+    def block_dist(self, a, b):
+        """Manhattan distance between blocks a and b on the block grid.
+        Works elementwise on numpy arrays. Reduces to |a - b| when block_rows = 1."""
+        (ar, ac), (br, bc) = self.block_coords(a), self.block_coords(b)
+        return np.abs(ar - br) + np.abs(ac - bc)
+
+    def crane_dist(self, p, q) -> int:
+        """Crane Manhattan distance between positions (bl, ba, r): block-grid
+        distance plus in-block bay and row distance."""
+        return int(self.block_dist(int(p[0]), int(q[0]))
+                   + abs(int(p[1]) - int(q[1])) + abs(int(p[2]) - int(q[2])))
+
     def _stack_height(self, bl: int, ba: int, r: int) -> int:
         """Number of occupied tiers in a stack."""
         return int((self.grid[bl, ba, r, :] >= 0).sum())
@@ -371,7 +393,7 @@ class DepotEnv(gym.Env):
         # Crane travel BEFORE reshuffle moves
         prev_pos = self.crane_pos.copy()
         new_pos = np.array([bl, ba, r], dtype=np.int32)
-        dist = int(np.abs(prev_pos - new_pos).sum())
+        dist = self.crane_dist(prev_pos, new_pos)
         self.crane_pos = new_pos
 
         # Relocate containers above the target
