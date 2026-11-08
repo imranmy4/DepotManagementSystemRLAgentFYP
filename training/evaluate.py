@@ -1,8 +1,8 @@
 """Compare the trained agent against heuristic baselines on operational metrics.
 
-    python evaluate.py            # evaluate the 'tiny' experiment (default)
-    python evaluate.py full       # evaluate the full-config run
-    python evaluate.py abl_travel_div3
+    python training/evaluate.py            # evaluate the 'tiny' experiment (default)
+    python training/evaluate.py full       # evaluate the full-config run
+    python training/evaluate.py abl_travel_div3
 
 All policies run on a bare (seeded) DepotEnv so they see identical demand sequences per
 episode (paired comparison). The agent reuses its saved VecNormalize statistics to
@@ -21,7 +21,7 @@ Output:
 With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 30/50/70/85%,
 new vs mixed-age pre-fill, inbound/outbound-heavy demand), printing a summary table per
 scenario, overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
-    python evaluate.py robust_lean --stress
+    python training/evaluate.py robust_lean --stress
 """
 import os
 import sys
@@ -29,15 +29,11 @@ import argparse
 import dataclasses
 import numpy as np
 
-from sb3_contrib import MaskablePPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-
-from depot_env import DepotEnv, DepotConfig
-from reward import RewardConfig
-from baselines import random_action, fifo_action, nearest_action, planner_action
-from train import EXPERIMENTS, resolve_config
-import configloader
-import runs
+from depot import config as configloader, runs
+from depot.baselines import random_action, fifo_action, nearest_action, planner_action
+from depot.config import EXPERIMENTS, load_eval_config
+from depot.env import DepotEnv, DepotConfig
+from depot.inference import Policy
 
 N_EPISODES = 50
 
@@ -167,44 +163,27 @@ def performance(res):
     }
 
 
-def load_eval_config(experiment, run_dir):
-    """Prefer the config snapshot saved at train time; else resolve from config.ini."""
-    snap = os.path.join(run_dir, "config_used.ini")
-    if os.path.exists(snap):
-        p = configloader.read_ini(snap)
-        return (configloader.load_dataclass(DepotConfig, p, "depot"),
-                configloader.load_dataclass(RewardConfig, p, "reward"))
-    depot, reward, _ = resolve_config(experiment)
-    return depot, reward
-
-
-def make_agent_policies(depot_config, run_dir):
+def make_agent_policies(experiment, depot_config, run_dir):
     """Load the trained agent once; return ({label: choose_action}, model_name).
 
     Provides BOTH a deterministic ('Agent') and a stochastic ('Agent-sto') policy: a
     poorly-peaked policy can score very differently under argmax vs sampling, so we
     report both instead of hiding the gap behind a single deterministic number. The
-    model + matching normalizer (best_model, else final) are resolved by runs.resolve_model.
+    model + matching normalizer are loaded by depot.inference.Policy.
     Returns ({}, None) if no loadable model is present.
     """
-    model_path, vecnorm_path = runs.resolve_model(run_dir)
-    if model_path is None:
+    try:
+        policy = Policy.load(experiment, run=run_dir, depot_config=depot_config)
+    except FileNotFoundError:
         return {}, None
-
-    vecnorm = VecNormalize.load(vecnorm_path, DummyVecEnv([lambda: DepotEnv(depot_config)]))
-    vecnorm.training = False
-    model = MaskablePPO.load(model_path)
 
     def make(determ):
         def choose(env, obs):
-            nobs = vecnorm.normalize_obs(obs.astype(np.float32))
-            action, _ = model.predict(nobs, action_masks=env.action_masks(),
-                                      deterministic=determ)
-            return int(np.asarray(action).reshape(-1)[0])
+            return policy.act(env, obs, deterministic=determ)
         return choose
 
-#    return {"Agent": make(True), "Agent-sto": make(False)}, os.path.basename(model_path)
-    return {"Agent": make(True)}, os.path.basename(model_path)
+#    return {"Agent": make(True), "Agent-sto": make(False)}, policy.model_name
+    return {"Agent": make(True)}, policy.model_name
 
 # Headline metrics: (perf key, column label, unit/explanation, higher_is_better, fmt)
 SUMMARY_COLS = [
@@ -391,7 +370,7 @@ def main():
     run_dir = runs.resolve_run_dir(args.experiment, args.run)
     depot_config, reward_config = load_eval_config(args.experiment, run_dir)
     depot_config = configloader.apply_cli(depot_config, args)
-    agent_policies, model_name = make_agent_policies(depot_config, run_dir)
+    agent_policies, model_name = make_agent_policies(args.experiment, depot_config, run_dir)
 
     if args.stress:
         run_stress(args, run_dir, depot_config, reward_config, agent_policies, model_name)

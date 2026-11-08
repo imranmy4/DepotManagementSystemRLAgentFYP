@@ -1,5 +1,4 @@
-"""Per-run model folder layout + resolution — shared by train.py, evaluate.py, and the
-future dashboard, so they all agree on where a run's artifacts live and which is "current".
+"""Per-run model folder layout + resolution — shared by training/ and deploy/, so they all agree on where a run's artifacts live and which is "current".
 
 Layout:
     models/<exp>/
@@ -22,13 +21,15 @@ import os
 import glob
 import time
 
+from depot import paths
+
 
 def new_run_id():
     return time.strftime("run_%Y%m%d-%H%M%S")
 
 
 def exp_dir(experiment):
-    return os.path.join("models", experiment)
+    return os.path.join(paths.MODELS_DIR, experiment)
 
 
 def write_current(experiment, run_id):

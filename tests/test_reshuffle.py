@@ -1,5 +1,5 @@
 import numpy as np
-from depot_env import DepotEnv, DepotConfig
+from depot.env import DepotEnv, DepotConfig
 
 
 def fresh_env(**cfg):

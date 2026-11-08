@@ -1,10 +1,10 @@
 .venv
 CLAUDE.md
 __pycache__/
+*.egg-info/
+.pytest_cache/
 logs/*
 !logs/.gitkeep
 models/*
 !models/.gitkeep
-copy logs models/
-config copy.ini
-model_list.txt
+notes/run_log.md

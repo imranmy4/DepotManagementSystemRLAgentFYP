@@ -1,12 +1,12 @@
 """Config-driven training harness for the depot agent.
 
-Config comes from config.ini (see configloader.py); named experiments below apply
-deltas on top of that base, and any field can be overridden on the CLI.
+Config comes from configs/config.ini; named experiments (depot/config.py EXPERIMENTS)
+apply deltas on top of that base, and any field can be overridden on the CLI.
 
-    python train.py full                       # full config from config.ini
-    python train.py full --n_blocks 5 --w_reshuffle 4   # CLI overrides
-    python train.py abl_reshuffle_heavy        # an ablation delta
-    python train.py full --smoke               # tiny budget, just verify wiring
+    python training/train.py full                       # full config from config.ini
+    python training/train.py full --n_blocks 5 --w_reshuffle 4   # CLI overrides
+    python training/train.py abl_reshuffle_heavy        # an ablation delta
+    python training/train.py full --smoke               # tiny budget, just verify wiring
 
 Precedence: dataclass defaults < config.ini < experiment delta < CLI override.
 The resolved config is snapshotted to models/<name>/config_used.ini so evaluation
@@ -17,7 +17,6 @@ scope, MinMax priority, corridor scope, warmstart) are NOT here yet — see CLAU
 """
 import os
 import argparse
-from dataclasses import dataclass, replace
 
 import torch
 from sb3_contrib import MaskablePPO
@@ -28,10 +27,10 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
-from depot_env import DepotEnv, DepotConfig
-from reward import RewardConfig
-import configloader
-import runs
+from depot import config as configloader, paths, runs
+from depot.config import EXPERIMENTS, TrainConfig, resolve_config
+from depot.env import DepotEnv, DepotConfig
+from depot.reward import RewardConfig
 
 
 class _SaveVecNormalize(BaseCallback):
@@ -51,75 +50,9 @@ class _SaveVecNormalize(BaseCallback):
         return True
 
 
-@dataclass
-class TrainConfig:
-    total_timesteps: int = 2_000_000
-    n_envs: int = 8
-    device: str = "cpu"
-    learning_rate: float = 3e-4
-    n_steps: int = 2048
-    batch_size: int = 256
-    n_epochs: int = 10
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
-    clip_range: float = 0.2
-    # Small entropy bonus to keep exploring
-    ent_coef: float = 0.01
-    # Early-stop the epoch loop once the policy moves more than this KL from the old one.
-    # Main guard against the high-approx_kl / high-clip_fraction thrashing PPO falls into
-    # on long-episode, large-reward regimes. Set 0 to disable (-> None in train()).
-    target_kl: float = 0.03
-    # Hidden layer sizes for both the policy and value MLP heads, comma-separated.
-    net_arch: str = "256,256"
-    vf_coef: float = 0.5   # value function loss coefficient (relative to policy loss)
-    # Intra-op threads for the PyTorch update. More is not faster for a 256x256 MLP:
-    # measured on a 6P+4E / 16-thread laptop, 4 threads beat the default (8) by ~30%
-    # and 16 was ~5x slower. 0 = leave PyTorch's default.
-    torch_threads: int = 4
-
-
 # Direct MaskablePPO constructor kwargs (net_arch is handled separately via policy_kwargs).
 PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
             "gamma", "gae_lambda", "clip_range", "ent_coef", "vf_coef"]
-
-# Varied conditions per episode: fill 30-85%, half the episodes start from a messy
-# mixed-age yard, inbound/outbound caps each shifted by up to ±3.
-ROBUST_DEPOT = dict(warmstart=0.3, warmstart_max=0.85, warmstart_aged=0.5, demand_jitter=3)
-
-# Lean reward: drop terms that overlap with others. Kept: reshuffle (scope-scaled), burial
-# (capped), dwell on retrieval + per-tick mean idle, cliff, and a linear travel penalty
-# (threshold_divisor=100 makes the threshold 1, so every move costs -w_travel*dist and the
-# short-move compensation never applies).
-LEAN_REWARD = dict(w_height=0.0, w_profile=0.0, w_center=0.0, w_max_idle=0.0,
-                   w_travel_compensate=0.0, threshold_divisor=100)
-
-# Each experiment is a delta applied on top of the config.ini base. "full" = base.
-EXPERIMENTS = {
-    "full": {},
-
-    # Sanity check: tiny depot, short budget, single env.
-    "tiny": {
-        "depot": dict(n_blocks=2, n_bays=2, n_rows=2, n_tiers=2, n_ticks=10, max_in=2, max_out=2),
-        "train": dict(total_timesteps=100_000, n_envs=1, n_steps=512, batch_size=64),
-    },
-
-    # ---- Config-only ablations on the full config -------------------------
-    "abl_reshuffle_count_only": {
-        "reward": dict(reshuffle_mult_same=1.0, reshuffle_mult_adjacent=1.0, reshuffle_mult_far=1.0),
-    },
-    "abl_travel_div3":     {"reward": dict(threshold_divisor=3)},
-    "abl_travel_div4":     {"reward": dict(threshold_divisor=4)},
-    "abl_dwell_heavy":     {"reward": dict(w_dwell=2.0)},
-    "abl_travel_heavy":    {"reward": dict(w_travel=0.6)},
-    "abl_reshuffle_heavy": {"reward": dict(w_reshuffle=2.0)},
-    "abl_shape_off":       {"reward": dict(w_cliff=0.0, w_profile=0.0, w_center=0.0)},
-    "abl_center_off":      {"reward": dict(w_center=0.0)},
-
-    # Robust training on varied conditions, with the full reward and with the lean reward.
-    "robust":      {"depot": ROBUST_DEPOT},
-    "robust_lean": {"depot": ROBUST_DEPOT, "reward": LEAN_REWARD},
-    "abl_burial_uncapped": {"reward": dict(burial_cap=0.0)},
-}
 
 
 def mask_fn(env):
@@ -141,29 +74,6 @@ def make_vec_env(depot_config, reward_config, n_envs):
     """Vectorised, observation/reward-normalised env stack for training."""
     venv = DummyVecEnv([make_env(depot_config, reward_config) for _ in range(n_envs)])
     return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
-
-
-def resolve_config(experiment, args=None, ini_path="config.ini"):
-    """Build (DepotConfig, RewardConfig, TrainConfig) for an experiment.
-
-    Layers: config.ini base -> experiment delta -> CLI overrides (if args given).
-    """
-    parser = configloader.read_ini(ini_path)
-    depot = configloader.load_dataclass(DepotConfig, parser, "depot")
-    reward = configloader.load_dataclass(RewardConfig, parser, "reward")
-    train_cfg = configloader.load_dataclass(TrainConfig, parser, "train")
-
-    delta = EXPERIMENTS[experiment]
-    depot = replace(depot, **delta.get("depot", {}))
-    reward = replace(reward, **delta.get("reward", {}))
-    train_cfg = replace(train_cfg, **delta.get("train", {}))
-
-    if args is not None:
-        depot = configloader.apply_cli(depot, args)
-        reward = configloader.apply_cli(reward, args)
-        train_cfg = configloader.apply_cli(train_cfg, args)
-
-    return depot, reward, train_cfg
 
 
 def _resume_run_dir(name, resume):
@@ -190,7 +100,7 @@ def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
         run_id = runs.new_run_id()
         run_dir = os.path.join(runs.exp_dir(name), run_id)
     os.makedirs(run_dir, exist_ok=True)
-    tb_log = f"./logs/{name}/{run_id}/"   # logs share the run_id, so logs <-> models match
+    tb_log = os.path.join(paths.LOGS_DIR, name, run_id)   # logs share the run_id, so logs <-> models match
 
     if not resume:
         # Snapshot the exact config used, so evaluation can reproduce it.

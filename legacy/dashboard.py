@@ -1,8 +1,10 @@
 """Interactive Streamlit dashboard for the depot RL agent.
 
-    streamlit run dashboard.py
+    streamlit run legacy/dashboard.py
 
-Loads the CURRENT model for the chosen experiment (via runs.py), lets you feed the yard
+LEGACY — to be removed once the new frontend (deploy/) replaces it.
+
+Loads the CURRENT model for the chosen experiment (via depot.inference), lets you feed the yard
 inbound/outbound demand tick by tick, and watch the trained agent place/retrieve containers
 in a 3D yard view. Containers are green and solidify (opacity + colour) with dwell time; the
 crane position is marked in red. Live metrics (total reward, reshuffle count, crane travel)
@@ -14,13 +16,9 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from sb3_contrib import MaskablePPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-
-from depot_env import DepotEnv
-from train import EXPERIMENTS
-from evaluate import load_eval_config
-import runs
+from depot.config import EXPERIMENTS
+from depot.env import DepotEnv
+from depot.inference import Policy
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -29,11 +27,10 @@ import runs
 # tick/demand orchestration lives here, so the env file stays untouched.
 # ──────────────────────────────────────────────────────────────────────────
 class DashboardRun:
-    def __init__(self, depot_cfg, reward_cfg, model, vecnorm):
+    def __init__(self, depot_cfg, reward_cfg, policy):
         self.depot_cfg = depot_cfg
         self.reward_cfg = reward_cfg
-        self.model = model
-        self.vecnorm = vecnorm
+        self.policy = policy
         self.reset()
 
     def reset(self):
@@ -50,10 +47,7 @@ class DashboardRun:
         self.log = []
 
     def _predict(self, mask):
-        obs = self.env._get_obs()
-        nobs = self.vecnorm.normalize_obs(obs.astype(np.float32))
-        a, _ = self.model.predict(nobs, action_masks=mask, deterministic=True)
-        return int(np.asarray(a).reshape(-1)[0])
+        return self.policy.act(self.env)
 
     def _mode_step(self):
         """Mirror DepotEnv._update_mode_or_advance, minus the (auto) tick advance.
@@ -255,16 +249,12 @@ def render_yard(env, show_numbers=True):
 # ──────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_agent(experiment):
-    run_dir = runs.resolve_run_dir(experiment)
-    depot_cfg, reward_cfg = load_eval_config(experiment, run_dir)
-    model_path, vn_path = runs.resolve_model(run_dir)
-    if model_path is None:
+    try:
+        policy = Policy.load(experiment)
+    except FileNotFoundError:
         return None
-    vecnorm = VecNormalize.load(vn_path, DummyVecEnv([lambda: DepotEnv(depot_cfg)]))
-    vecnorm.training = False
-    model = MaskablePPO.load(model_path)
-    return dict(run_dir=run_dir, depot_cfg=depot_cfg, reward_cfg=reward_cfg,
-                model=model, vecnorm=vecnorm, model_name=os.path.basename(model_path))
+    return dict(run_dir=policy.run_dir, depot_cfg=policy.depot_config,
+                reward_cfg=policy.reward_config, policy=policy, model_name=policy.model_name)
 
 
 def main():
@@ -276,7 +266,7 @@ def main():
                                index=exps.index("full") if "full" in exps else 0)
     agent = load_agent(exp)
     if agent is None:
-        st.error(f"No trained model found for '{exp}'. Train one first: `python train.py {exp}`")
+        st.error(f"No trained model found for '{exp}'. Train one first: `python training/train.py {exp}`")
         st.stop()
 
     cfg = agent["depot_cfg"]
@@ -286,7 +276,7 @@ def main():
 
     # (re)create the interactive run when the experiment changes
     if st.session_state.get("exp") != exp or "run" not in st.session_state:
-        st.session_state.run = DashboardRun(cfg, agent["reward_cfg"], agent["model"], agent["vecnorm"])
+        st.session_state.run = DashboardRun(cfg, agent["reward_cfg"], agent["policy"])
         st.session_state.exp = exp
     run = st.session_state.run
     env = run.env
