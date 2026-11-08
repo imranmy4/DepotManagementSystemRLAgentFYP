@@ -19,6 +19,7 @@ import os
 import argparse
 from dataclasses import dataclass, replace
 
+import torch
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
@@ -71,6 +72,10 @@ class TrainConfig:
     # Hidden layer sizes for both the policy and value MLP heads, comma-separated.
     net_arch: str = "256,256"
     vf_coef: float = 0.5   # value function loss coefficient (relative to policy loss)
+    # Intra-op threads for the PyTorch update. More is not faster for a 256x256 MLP:
+    # measured on a 6P+4E / 16-thread laptop, 4 threads beat the default (8) by ~30%
+    # and 16 was ~5x slower. 0 = leave PyTorch's default.
+    torch_threads: int = 4
 
 
 # Direct MaskablePPO constructor kwargs (net_arch is handled separately via policy_kwargs).
@@ -173,6 +178,9 @@ def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
         # Snapshot the exact config used, so evaluation can reproduce it.
         configloader.dump_configs(os.path.join(run_dir, "config_used.ini"),
                                   {"depot": depot, "reward": reward, "train": train_cfg})
+
+    if train_cfg.torch_threads > 0:
+        torch.set_num_threads(train_cfg.torch_threads)
 
     vec_env = make_vec_env(depot, reward, train_cfg.n_envs)
     ppo_kwargs = {k: getattr(train_cfg, k) for k in PPO_KEYS}
