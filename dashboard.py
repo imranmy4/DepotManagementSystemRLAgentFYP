@@ -118,7 +118,7 @@ class DashboardRun:
             _, bl, ba, r, h = decoded
             retrieved = int(env.grid[bl, ba, r, h])      # read dwell BEFORE removal
             dist, rd, reshuffle_moves = env._apply_outbound(bl, ba, r, h)
-            reward, _ = env.reward_calc.compute_outbound_step(retrieved, dist, rd)
+            reward, _ = env.reward_calc.compute_outbound_step(retrieved, dist, rd, (bl, ba, r))
             self.total_reward += reward
             self.total_travel += dist
             self.total_reshuffles += len(rd)
@@ -136,7 +136,7 @@ class DashboardRun:
 # ──────────────────────────────────────────────────────────────────────────
 # 3D yard rendering
 # ──────────────────────────────────────────────────────────────────────────
-BLOCK_GAP = 1        # empty columns between blocks along the x axis
+BLOCK_GAP = 1        # empty bays/rows (aisle) between neighbouring blocks
 BOX_W, BOX_H = 0.82, 0.9   # cuboid footprint / height (< 1 leaves seams between boxes)
 N_OPACITY_BUCKETS = 5      # Mesh3d opacity is per-trace, so dwell-opacity is bucketed
 
@@ -144,6 +144,14 @@ N_OPACITY_BUCKETS = 5      # Mesh3d opacity is per-trace, so dwell-opacity is bu
 _CUBE_TRIS = [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7),
               (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5),
               (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+
+
+def slot_xy(env, bl, ba, r):
+    """Plot (x, y) of stack (bl, ba, r). Blocks sit on the env's block grid
+    (block_rows x block_cols, row-major): bays run along x within a block column,
+    rows along y within a block row, with a BLOCK_GAP aisle between blocks."""
+    brow, bcol = env.block_coords(int(bl))
+    return bcol * (env.Ba + BLOCK_GAP) + ba, brow * (env.R + BLOCK_GAP) + r
 
 
 def _cube_corners(cx, cy, cz):
@@ -178,7 +186,8 @@ def render_yard(env, show_numbers=True):
                         continue
                     t = min(1.0, d / maxd)
                     bk = int(round(t * (N_OPACITY_BUCKETS - 1)))
-                    cx, cy, cz = bl * (Ba + BLOCK_GAP) + ba, r, h
+                    cx, cy = slot_xy(env, bl, ba, r)
+                    cz = h
                     data = buckets.setdefault(bk, dict(verts=[], tris=[], fc=[]))
                     base = len(data["verts"])
                     data["verts"].extend(_cube_corners(cx, cy, cz))
@@ -190,12 +199,19 @@ def render_yard(env, show_numbers=True):
 
     fig = go.Figure()
 
-    # ground plane
-    gx1 = (B - 1) * (Ba + BLOCK_GAP) + (Ba - 1) + 0.7
-    fig.add_trace(go.Mesh3d(
-        x=[-0.7, gx1, gx1, -0.7], y=[-0.7, -0.7, R - 0.3, R - 0.3], z=[-0.05] * 4,
-        i=[0, 0], j=[1, 2], k=[2, 3], color="rgb(140,205,230)", opacity=0.5,
-        hoverinfo="skip", showscale=False))
+    # ground pad + label per block, laid out on the block grid
+    bx, by, bt = [], [], []
+    for bl in range(B):
+        x0, y0 = slot_xy(env, bl, 0, 0)
+        x0, y0, x1, y1 = x0 - 0.7, y0 - 0.7, x0 + Ba - 0.3, y0 + R - 0.3
+        fig.add_trace(go.Mesh3d(
+            x=[x0, x1, x1, x0], y=[y0, y0, y1, y1], z=[-0.05] * 4,
+            i=[0, 0], j=[1, 2], k=[2, 3], color="rgb(140,205,230)", opacity=0.5,
+            hoverinfo="skip", showscale=False))
+        bx.append((x0 + x1) / 2); by.append(y0 - 0.4); bt.append(f"block {bl}")
+    fig.add_trace(go.Scatter3d(x=bx, y=by, z=[0] * B, mode="text", text=bt,
+                               textfont=dict(size=12, color="rgb(140,205,230)"),
+                               hoverinfo="skip"))
 
     # container cuboids — one Mesh3d per opacity bucket (Mesh3d opacity is per-trace)
     for bk, data in sorted(buckets.items()):
@@ -217,7 +233,8 @@ def render_yard(env, show_numbers=True):
 
     # crane indicator over its column
     cb, cba, cr = (int(v) for v in env.crane_pos)
-    cx, cy, cz = cb * (Ba + BLOCK_GAP) + cba, cr, H + 0.7
+    cx, cy = slot_xy(env, cb, cba, cr)
+    cz = H + 0.7
     fig.add_trace(go.Scatter3d(x=[cx], y=[cy], z=[cz], mode="markers+text",
                                marker=dict(size=10, color="red", symbol="diamond"),
                                text=["crane"], textposition="top center",
@@ -226,7 +243,7 @@ def render_yard(env, show_numbers=True):
                                line=dict(color="red", width=5, dash="dot"), hoverinfo="skip"))
 
     fig.update_layout(
-        scene=dict(xaxis=dict(title="block · bay"), yaxis=dict(title="row"),
+        scene=dict(xaxis=dict(title="bay (block column)"), yaxis=dict(title="row (block row)"),
                    zaxis=dict(title="tier", range=[0, H + 1.5]),
                    aspectmode="data", camera=dict(eye=dict(x=1.6, y=1.6, z=1.05))),
         margin=dict(l=0, r=0, t=10, b=0), height=580, showlegend=False)

@@ -101,6 +101,9 @@ EXPERIMENTS = {
     "abl_dwell_heavy":     {"reward": dict(w_dwell=2.0)},
     "abl_travel_heavy":    {"reward": dict(w_travel=0.6)},
     "abl_reshuffle_heavy": {"reward": dict(w_reshuffle=2.0)},
+    "abl_shape_off":       {"reward": dict(w_cliff=0.0, w_profile=0.0, w_center=0.0)},
+    "abl_center_off":      {"reward": dict(w_center=0.0)},
+    "abl_burial_uncapped": {"reward": dict(burial_cap=0.0)},
 }
 
 

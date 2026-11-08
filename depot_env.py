@@ -242,7 +242,7 @@ class DepotEnv(gym.Env):
             retrieved_dwell = int(self.grid[bl, ba, r, h])
             dist, reshuffle_dists, _ = self._apply_outbound(bl, ba, r, h)
             reward, breakdown = self.reward_calc.compute_outbound_step(
-                retrieved_dwell, dist, reshuffle_dists
+                retrieved_dwell, dist, reshuffle_dists, (bl, ba, r)
             )
 
         self._update_mode_or_advance()
