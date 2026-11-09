@@ -29,7 +29,7 @@ import dataclasses
 import numpy as np
 
 from depot import config as configloader, runs
-from depot.baselines import random_action, fifo_action, nearest_action, planner_action
+from baselines import random_action, fifo_action, nearest_action, planner_action
 from depot.config import load_run_config
 from depot.env import DepotEnv, DepotConfig
 from depot.inference import Policy

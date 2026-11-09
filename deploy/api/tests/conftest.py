@@ -18,15 +18,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.settings import settings
-from depot.env import DepotConfig
+from helpers import TINY
 
 assert settings.postgres_db.endswith("_test"), "tests must run against a *_test database"
 
 API_DIR = Path(__file__).resolve().parents[1]
-
-# Small yard: 2 blocks side by side, 2 bays x 2 rows x 3 tiers each.
-TINY = DepotConfig(n_blocks=2, block_rows=1, n_bays=2, n_rows=2, n_tiers=3)
-
 
 @pytest.fixture(scope="session")
 def engine():

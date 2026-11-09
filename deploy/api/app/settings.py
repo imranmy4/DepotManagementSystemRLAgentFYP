@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
 
+    # Real seconds per model tick, the unit of dwell time the model was trained on (1 day).
+    tick_seconds: int = 86400
+
     @property
     def database_url(self) -> URL:
         # URL.create escapes special characters in the password (e.g. @ or %).

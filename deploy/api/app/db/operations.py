@@ -10,14 +10,16 @@ Order flow:
     reject_order (before any move is confirmed)    -> rejected
 
 Every function works inside the caller's transaction and flushes but never commits.
+Timestamps come from the database clock (transaction start time).
 Positions are (block, bay, row, tier) tuples, as in the env.
 """
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import iso6346
 from app.db.models import (
     Container, ContainerLocation, MoveLog, MoveStatus, MoveType, Order, OrderStatus, OrderType,
     Slot, YardState,
@@ -46,8 +48,9 @@ class YardContainer:
     arrived_at: datetime     # completed_at of the container's latest inbound order
 
 
-def _now(now: datetime | None) -> datetime:
-    return now or datetime.now(timezone.utc)
+def db_now(session: Session) -> datetime:
+    """Database time at the start of the current transaction."""
+    return session.scalar(select(func.now()))
 
 
 # ─── Reads ─────────────────────────────────────────────────────────────────────
@@ -134,8 +137,10 @@ def _apply(occupied: dict[Pos, str], src: Pos | None, dst: Pos | None, container
 # ─── Orders ────────────────────────────────────────────────────────────────────
 
 def create_inbound_order(session: Session, container_no: str, truck_no: str | None = None,
-                         owner_line: str | None = None, now: datetime | None = None) -> Order:
+                         owner_line: str | None = None) -> Order:
     """Queue an inbound order; registers the container on its first visit."""
+    if not iso6346.is_valid(container_no):
+        raise OperationError(f"{container_no!r} is not a valid ISO 6346 container number")
     if session.get(Container, container_no) is None:
         session.add(Container(container_no=container_no, owner_line=owner_line))
     in_yard = session.scalar(select(ContainerLocation.id).where(
@@ -147,17 +152,15 @@ def create_inbound_order(session: Session, container_no: str, truck_no: str | No
         Order.status.in_([OrderStatus.QUEUED, OrderStatus.IN_PROGRESS])))
     if open_order is not None:
         raise OperationError(f"{container_no} already has open inbound order {open_order}")
-    order = Order(type=OrderType.INBOUND, container_no=container_no, truck_no=truck_no,
-                  created_at=_now(now))
+    order = Order(type=OrderType.INBOUND, container_no=container_no, truck_no=truck_no)
     session.add(order)
     session.flush()
     return order
 
 
-def create_outbound_order(session: Session, truck_no: str | None = None,
-                          now: datetime | None = None) -> Order:
+def create_outbound_order(session: Session, truck_no: str | None = None) -> Order:
     """Queue an outbound order; the container is chosen later by the policy."""
-    order = Order(type=OrderType.OUTBOUND, truck_no=truck_no, created_at=_now(now))
+    order = Order(type=OrderType.OUTBOUND, truck_no=truck_no)
     session.add(order)
     session.flush()
     return order
@@ -174,8 +177,7 @@ def start_order(session: Session, order_id: int, decided_by: str) -> Order:
     return order
 
 
-def plan_moves(session: Session, order_id: int, moves: list[PlannedMove],
-               now: datetime | None = None) -> list[MoveLog]:
+def plan_moves(session: Session, order_id: int, moves: list[PlannedMove]) -> list[MoveLog]:
     """Store the crane instructions of an in-progress order as planned moves.
 
     Inbound: exactly one store. Outbound: relocations, then one retrieve. The whole sequence is
@@ -205,7 +207,7 @@ def plan_moves(session: Session, order_id: int, moves: list[PlannedMove],
             order_id=order_id, seq=seq, move_type=m.move_type, container_no=cno,
             from_slot_id=_slot_id(session, m.from_pos) if m.from_pos else None,
             to_slot_id=_slot_id(session, m.to_pos) if m.to_pos else None,
-            crane_travel=m.crane_travel, created_at=_now(now)))
+            crane_travel=m.crane_travel))
 
     if order.type == OrderType.OUTBOUND:
         order.container_no = rows[-1].container_no
@@ -214,13 +216,13 @@ def plan_moves(session: Session, order_id: int, moves: list[PlannedMove],
     return rows
 
 
-def confirm_move(session: Session, move_id: int, now: datetime | None = None) -> MoveLog:
+def confirm_move(session: Session, move_id: int) -> MoveLog:
     """Record that the crane carried out a planned move; moves must be confirmed in order.
 
     Updates container locations (and the crane after a retrieve); the last move completes
     the order.
     """
-    now = _now(now)
+    now = db_now(session)
     move = session.get(MoveLog, move_id, with_for_update=True)
     if move is None:
         raise OperationError(f"move {move_id} not found")

@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from app.db.models import Slot, YardBlock, YardState
 from app.db.seed import LayoutMismatch, layout_diff, seed_layout
-from conftest import TINY
+from helpers import TINY
 
 
 def test_seed_creates_layout(session):
