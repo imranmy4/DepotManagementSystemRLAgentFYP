@@ -138,7 +138,7 @@ class Order(Base):
     # Set at creation for inbound; set when the container is picked for outbound.
     container_no: Mapped[str | None] = mapped_column(ForeignKey("container.container_no"))
     truck_no: Mapped[str | None] = mapped_column(String(20))
-    # Policy that processed the order, e.g. "robust_lean/run_20261101-041443/best_model".
+    # Policy that processed the order, e.g. "run_20261101-041443/best_model".
     decided_by: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP)

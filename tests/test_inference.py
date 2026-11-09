@@ -26,7 +26,7 @@ def _make_run(run_dir):
 
 def test_policy_loads_bundle_and_config(tmp_path):
     _make_run(str(tmp_path))
-    policy = Policy.load("tiny", run=str(tmp_path))
+    policy = Policy.load(tmp_path)
     assert policy.depot_config == TINY            # config comes from the run snapshot
     assert policy.model_name == "depot_ppo_final"
     assert policy.vecnorm.training is False
@@ -34,7 +34,7 @@ def test_policy_loads_bundle_and_config(tmp_path):
 
 def test_policy_actions_respect_mask(tmp_path):
     _make_run(str(tmp_path))
-    policy = Policy.load("tiny", run=str(tmp_path))
+    policy = Policy.load(tmp_path)
     env = DepotEnv(policy.depot_config, reward_config=policy.reward_config)
     env.reset(seed=0)
     for _ in range(40):
@@ -50,7 +50,7 @@ def test_policy_missing_model_raises(tmp_path):
     dump_configs(os.path.join(tmp_path, "config_used.ini"),
                  {"depot": TINY, "reward": RewardConfig()})
     try:
-        Policy.load("tiny", run=str(tmp_path))
+        Policy.load(tmp_path)
     except FileNotFoundError:
         return
     raise AssertionError("expected FileNotFoundError for a run with no model")

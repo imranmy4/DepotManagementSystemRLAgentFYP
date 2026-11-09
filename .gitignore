@@ -10,3 +10,4 @@ models/*
 !models/.gitkeep
 notes/run_log.md
 deploy/.env
+deploy/model/
