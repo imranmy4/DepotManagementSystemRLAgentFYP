@@ -62,9 +62,14 @@ class YardBlock(Base):
     num_bays: Mapped[int] = mapped_column(SmallInteger)
     num_rows: Mapped[int] = mapped_column(SmallInteger)
     num_tiers: Mapped[int] = mapped_column(SmallInteger)
+    # Position on the block grid; crane distance and block adjacency are measured on it.
+    grid_row: Mapped[int] = mapped_column(SmallInteger)
+    grid_col: Mapped[int] = mapped_column(SmallInteger)
     __table_args__ = (
         CheckConstraint("block_id >= 0", name="block_id_nonneg"),
         CheckConstraint("num_bays > 0 AND num_rows > 0 AND num_tiers > 0", name="dims_positive"),
+        CheckConstraint("grid_row >= 0 AND grid_col >= 0", name="grid_nonneg"),
+        UniqueConstraint("grid_row", "grid_col", name="uq_block_grid_position"),
     )
 
 
