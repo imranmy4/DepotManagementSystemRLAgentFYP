@@ -15,7 +15,6 @@ import os
 import streamlit as st
 import plotly.graph_objects as go
 
-from depot.config import EXPERIMENTS
 from depot.ops import LiveOrderRun
 from dashboard import (
     load_agent, render_yard,
@@ -97,12 +96,9 @@ def main():
     st.set_page_config(page_title="Depot Ops", layout="wide")
     st.title("🏗️ Container Depot — Operational View")
 
-    exps = list(EXPERIMENTS)
-    exp = st.sidebar.selectbox("Experiment", exps,
-                               index=exps.index("full") if "full" in exps else 0)
-    agent = load_agent(exp)
+    agent = load_agent()
     if agent is None:
-        st.error(f"No trained model for '{exp}'. Run: python training/train.py {exp}")
+        st.error("No trained model found. Run: python training/train.py")
         st.stop()
 
     cfg = agent["depot_cfg"]
@@ -116,8 +112,8 @@ def main():
         help="Fraction of yard capacity filled at reset (0 = empty, 0.8 = near-full)")
     show_nums = st.sidebar.checkbox("Show dwell numbers", value=True)
 
-    # Reset when experiment or warmstart level changes
-    key = f"ops_{exp}_{warmstart}"
+    # Reset when the warmstart level changes
+    key = f"ops_{warmstart}"
     st.sidebar.divider()
     if st.sidebar.button("📅 Advance day", use_container_width=True,
                          help="Age all containers by one tick"):

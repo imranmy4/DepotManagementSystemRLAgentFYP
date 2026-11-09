@@ -4,7 +4,7 @@
 
 LEGACY — to be removed once the new frontend (deploy/) replaces it.
 
-Loads the CURRENT model for the chosen experiment (via depot.inference), lets you feed the yard
+Loads the CURRENT training run (via depot.inference), lets you feed the yard
 inbound/outbound demand tick by tick, and watch the trained agent place/retrieve containers
 in a 3D yard view. Containers are green and solidify (opacity + colour) with dwell time; the
 crane position is marked in red. Live metrics (total reward, reshuffle count, crane travel)
@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from depot.config import EXPERIMENTS
+from depot import runs
 from depot.env import DepotEnv
 from depot.inference import Policy
 
@@ -248,12 +248,12 @@ def render_yard(env, show_numbers=True):
 # Streamlit app
 # ──────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def load_agent(experiment):
+def load_agent():
     try:
-        policy = Policy.load(experiment)
+        policy = Policy.load(runs.resolve_run_dir())
     except FileNotFoundError:
         return None
-    return dict(run_dir=policy.run_dir, depot_cfg=policy.depot_config,
+    return dict(run_dir=policy.model_dir, depot_cfg=policy.depot_config,
                 reward_cfg=policy.reward_config, policy=policy, model_name=policy.model_name)
 
 
@@ -261,12 +261,9 @@ def main():
     st.set_page_config(page_title="Depot RL Dashboard", layout="wide")
     st.title("🟩 Container Depot — RL Agent Dashboard")
 
-    exps = list(EXPERIMENTS)
-    exp = st.sidebar.selectbox("Experiment", exps,
-                               index=exps.index("full") if "full" in exps else 0)
-    agent = load_agent(exp)
+    agent = load_agent()
     if agent is None:
-        st.error(f"No trained model found for '{exp}'. Train one first: `python training/train.py {exp}`")
+        st.error("No trained model found. Train one first: `python training/train.py`")
         st.stop()
 
     cfg = agent["depot_cfg"]
@@ -274,10 +271,8 @@ def main():
     st.sidebar.caption(f"yard {cfg.n_blocks}×{cfg.n_bays}×{cfg.n_rows}×{cfg.n_tiers} "
                        f"(B×Ba×R×H) · n_ticks={cfg.n_ticks}")
 
-    # (re)create the interactive run when the experiment changes
-    if st.session_state.get("exp") != exp or "run" not in st.session_state:
+    if "run" not in st.session_state:
         st.session_state.run = DashboardRun(cfg, agent["reward_cfg"], agent["policy"])
-        st.session_state.exp = exp
     run = st.session_state.run
     env = run.env
 

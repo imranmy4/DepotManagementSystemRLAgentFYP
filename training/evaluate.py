@@ -1,8 +1,7 @@
 """Compare the trained agent against heuristic baselines on operational metrics.
 
-    python training/evaluate.py            # evaluate the 'tiny' experiment (default)
-    python training/evaluate.py full       # evaluate the full-config run
-    python training/evaluate.py abl_travel_div3
+    python training/evaluate.py                    # the CURRENT run
+    python training/evaluate.py --run run_<id>     # a specific run (id or path)
 
 All policies run on a bare (seeded) DepotEnv so they see identical demand sequences per
 episode (paired comparison). The agent reuses its saved VecNormalize statistics to
@@ -21,7 +20,7 @@ Output:
 With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 30/50/70/85%,
 new vs mixed-age pre-fill, inbound/outbound-heavy demand), printing a summary table per
 scenario, overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
-    python training/evaluate.py robust_lean --stress
+    python training/evaluate.py --stress
 """
 import os
 import sys
@@ -31,7 +30,7 @@ import numpy as np
 
 from depot import config as configloader, runs
 from depot.baselines import random_action, fifo_action, nearest_action, planner_action
-from depot.config import EXPERIMENTS, load_eval_config
+from depot.config import load_run_config
 from depot.env import DepotEnv, DepotConfig
 from depot.inference import Policy
 
@@ -163,7 +162,7 @@ def performance(res):
     }
 
 
-def make_agent_policies(experiment, depot_config, run_dir):
+def make_agent_policies(depot_config, run_dir):
     """Load the trained agent once; return ({label: choose_action}, model_name).
 
     Provides BOTH a deterministic ('Agent') and a stochastic ('Agent-sto') policy: a
@@ -173,7 +172,7 @@ def make_agent_policies(experiment, depot_config, run_dir):
     Returns ({}, None) if no loadable model is present.
     """
     try:
-        policy = Policy.load(experiment, run=run_dir, depot_config=depot_config)
+        policy = Policy.load(run_dir, depot_config=depot_config)
     except FileNotFoundError:
         return {}, None
 
@@ -310,7 +309,7 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
     fixed = dataclasses.replace(depot_config, warmstart_max=0.0, warmstart_aged=0.0,
                                 demand_jitter=0)
     print("=" * 78)
-    print(f"STRESS TEST — experiment '{args.experiment}', {len(STRESS_SCENARIOS)} scenarios x "
+    print(f"STRESS TEST — {len(STRESS_SCENARIOS)} scenarios x "
           f"{n} episodes (same demand for every policy within a scenario)")
     print(f"  run:   {os.path.basename(run_dir)} / "
           f"{model_name or 'no model found — baselines only'}")
@@ -353,7 +352,6 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
 
 def main():
     ap = argparse.ArgumentParser(description="Compare the trained agent vs baselines.")
-    ap.add_argument("experiment", nargs="?", default="tiny", choices=list(EXPERIMENTS))
     ap.add_argument("--episodes", type=int, default=None,
                     help=f"episodes per evaluation (default {N_EPISODES}; "
                          f"{STRESS_N_EPISODES} per scenario with --stress)")
@@ -367,10 +365,10 @@ def main():
     configloader.add_cli_args(ap, DepotConfig)
     args = ap.parse_args()
 
-    run_dir = runs.resolve_run_dir(args.experiment, args.run)
-    depot_config, reward_config = load_eval_config(args.experiment, run_dir)
+    run_dir = runs.resolve_run_dir(args.run)
+    depot_config, reward_config = load_run_config(run_dir)
     depot_config = configloader.apply_cli(depot_config, args)
-    agent_policies, model_name = make_agent_policies(args.experiment, depot_config, run_dir)
+    agent_policies, model_name = make_agent_policies(depot_config, run_dir)
 
     if args.stress:
         run_stress(args, run_dir, depot_config, reward_config, agent_policies, model_name)
@@ -382,7 +380,7 @@ def main():
 
     d = depot_config
     print("=" * 78)
-    print(f"EVALUATION — experiment '{args.experiment}', {n} episodes "
+    print(f"EVALUATION — {n} episodes "
           f"(same demand for every policy)")
     print(f"  run:   {os.path.basename(run_dir)} / "
           f"{model_name or 'no model found — baselines only'}")
