@@ -1,8 +1,8 @@
-"""Tests for depot.ops.LiveOrderRun step planning and application."""
+"""Tests for legacy ops.LiveOrderRun step planning and application."""
 import numpy as np
 
 from depot.env import DepotConfig
-from depot.ops import LiveOrderRun
+from ops import LiveOrderRun
 
 CFG = DepotConfig(n_blocks=2, block_rows=1, n_bays=2, n_rows=2, n_tiers=3, n_ticks=10,
                   max_in=2, max_out=2)

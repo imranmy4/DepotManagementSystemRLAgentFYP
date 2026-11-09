@@ -9,13 +9,13 @@ retrieve/place (each press applies the step and highlights the next). Press
     streamlit run legacy/dashboard_ops.py
 
 LEGACY — to be removed once the new frontend (deploy/) replaces it. The order/step
-logic lives in depot/ops.py.
+logic lives in legacy/ops.py.
 """
 import os
 import streamlit as st
 import plotly.graph_objects as go
 
-from depot.ops import LiveOrderRun
+from ops import LiveOrderRun
 from dashboard import (
     load_agent, render_yard,
     slot_xy, _CUBE_TRIS, _cube_corners,

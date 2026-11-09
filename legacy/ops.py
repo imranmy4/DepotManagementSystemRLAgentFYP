@@ -56,7 +56,7 @@ class LiveOrderRun:
             return "inbound" if self.rng.random() < 0.7 else "outbound"
         return "inbound" if can_in else ("outbound" if can_out else None)
 
-    # ── Step planning — runs reshuffler on a copy, never touches the real grid ─
+    # ── Step planning — dry run, never touches the real grid ─────────────────
 
     def _plan(self, action) -> list[dict]:
         decoded = self.env.decode_action(action)
@@ -69,11 +69,8 @@ class LiveOrderRun:
                               f"Block {bl+1} · Bay {ba+1} · Row {r+1} · Tier {h+1}")}]
 
         _, bl, ba, r, h = decoded
-        # Run reshuffler on a grid copy to capture the move sequence
+        moves = self.env.plan_relocations(bl, ba, r, h)
         saved = self.env.grid
-        self.env.grid = saved.copy()
-        moves = self.env.reshuffler.relocate_above(bl, ba, r, h)
-        self.env.grid = saved   # restore real grid
 
         steps: list[dict] = []
         for mv in moves:
