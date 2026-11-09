@@ -1,19 +1,15 @@
 """Config-driven training harness for the depot agent.
 
-Config comes from configs/config.ini; named experiments (depot/config.py EXPERIMENTS)
-apply deltas on top of that base, and any field can be overridden on the CLI.
+Config comes from configs/config.ini; any field can be overridden on the CLI.
 
-    python training/train.py full                       # full config from config.ini
-    python training/train.py full --n_blocks 5 --w_reshuffle 4   # CLI overrides
-    python training/train.py abl_reshuffle_heavy        # an ablation delta
-    python training/train.py full --smoke               # tiny budget, just verify wiring
+    python training/train.py                          # config.ini as-is
+    python training/train.py --w_reshuffle 4          # CLI override
+    python training/train.py --smoke                  # tiny budget, just verify wiring
+    python training/train.py --resume [run_id]        # continue a run from its checkpoint
 
-Precedence: dataclass defaults < config.ini < experiment delta < CLI override.
-The resolved config is snapshotted to models/<name>/config_used.ini so evaluation
+Precedence: dataclass defaults < config.ini < CLI override.
+The resolved config is snapshotted to models/<run_id>/config_used.ini so evaluation
 always uses the exact config a model was trained with.
-
-Ablations that need env/reward/reshuffle code changes (state composition, travel
-scope, MinMax priority, corridor scope, warmstart) are NOT here yet — see CLAUDE.md.
 """
 import os
 import argparse
@@ -28,7 +24,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 from depot import config as configloader, paths, runs
-from depot.config import EXPERIMENTS, TrainConfig, resolve_config
+from depot.config import TrainConfig, resolve_config
 from depot.env import DepotEnv, DepotConfig
 from depot.reward import RewardConfig
 
@@ -76,31 +72,27 @@ def make_vec_env(depot_config, reward_config, n_envs):
     return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
 
-def _resume_run_dir(name, resume):
+def _resume_run_dir(resume):
     """Locate the run dir to resume: latest run by default, or an explicit id / path."""
-    if resume in ("__latest__", True):
-        run_dir = runs.latest_run_dir(name)
-    elif os.path.isdir(resume):
-        run_dir = resume
-    else:
-        run_dir = os.path.join(runs.exp_dir(name), resume)
+    run_dir = runs.latest_run_dir() if resume == "__latest__" else (
+        resume if os.path.isdir(resume) else runs.run_dir(resume))
     if not run_dir or not os.path.isdir(run_dir):
-        raise FileNotFoundError(f"--resume: no run directory found for '{resume}' under models/{name}/")
+        raise FileNotFoundError(f"--resume: no run directory found for '{resume}' in models/")
     return run_dir
 
 
-def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
+def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_current=True):
     target_total = total_timesteps if total_timesteps is not None else train_cfg.total_timesteps
 
     # Each run gets its own folder; CURRENT points at the default run for eval/dashboard.
     if resume:
-        run_dir = _resume_run_dir(name, resume)
+        run_dir = _resume_run_dir(resume)
         run_id = os.path.basename(run_dir.rstrip("/"))
     else:
         run_id = runs.new_run_id()
-        run_dir = os.path.join(runs.exp_dir(name), run_id)
+        run_dir = runs.run_dir(run_id)
     os.makedirs(run_dir, exist_ok=True)
-    tb_log = os.path.join(paths.LOGS_DIR, name, run_id)   # logs share the run_id, so logs <-> models match
+    tb_log = os.path.join(paths.LOGS_DIR, run_id)   # logs share the run_id, so logs <-> models match
 
     if not resume:
         # Snapshot the exact config used, so evaluation can reproduce it.
@@ -172,16 +164,16 @@ def train(name, depot, reward, train_cfg, total_timesteps=None, resume=None):
 
     model.save(os.path.join(run_dir, "depot_ppo_final"))
     vec_env.save(os.path.join(run_dir, "vec_normalize.pkl"))
-    runs.write_current(name, run_id)      # this run becomes the default for eval/dashboard
-    print(f"Training complete for '{name}' run '{run_id}' ({steps} steps) ✓")
+    if set_current:
+        runs.write_current(run_id)        # this run becomes the default for eval/dashboard
+    print(f"Training complete for run '{run_id}' ({steps} steps) ✓")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Train the depot agent on a named experiment.")
-    ap.add_argument("experiment", nargs="?", default="tiny", choices=list(EXPERIMENTS),
-                    help="experiment to run (default: tiny)")
+    ap = argparse.ArgumentParser(description="Train the depot agent.")
     ap.add_argument("--smoke", action="store_true",
-                    help="tiny step budget just to verify the harness runs end-to-end")
+                    help="tiny step budget just to verify the harness runs end-to-end "
+                         "(does not move CURRENT)")
     ap.add_argument("--resume", nargs="?", const="__latest__", default=None,
                     help="resume training from a run's latest checkpoint: latest run by "
                          "default, or pass a run id / path (e.g. --resume run_20260603-194312)")
@@ -191,11 +183,12 @@ def main():
     configloader.add_cli_args(ap, TrainConfig)
     args = ap.parse_args()
 
-    depot, reward, train_cfg = resolve_config(args.experiment, args)
+    depot, reward, train_cfg = resolve_config(args)
     steps = train_cfg.n_steps * train_cfg.n_envs * 2 if args.smoke else None
     if args.smoke:
-        print(f"[smoke] running '{args.experiment}' for {steps} steps to verify wiring")
-    train(args.experiment, depot, reward, train_cfg, total_timesteps=steps, resume=args.resume)
+        print(f"[smoke] running for {steps} steps to verify wiring")
+    train(depot, reward, train_cfg, total_timesteps=steps, resume=args.resume,
+          set_current=not args.smoke)
 
 
 if __name__ == "__main__":

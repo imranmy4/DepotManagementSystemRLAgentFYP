@@ -20,9 +20,11 @@ dependencies = [
 [project.optional-dependencies]
 train = ["tensorboard", "tqdm", "rich", "pytest"]
 legacy = ["streamlit", "plotly", "pandas"]
+deploy = ["sqlalchemy>=2.0", "psycopg[binary]>=3.1", "alembic>=1.13", "pydantic-settings>=2"]
 
 [tool.setuptools.packages.find]
 include = ["depot*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "deploy/api/tests"]
+pythonpath = ["deploy/api", "deploy/api/tests"]

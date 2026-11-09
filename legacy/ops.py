@@ -1,12 +1,5 @@
-"""Order-at-a-time yard operation — the logic the deployment API wraps.
-
-An order (inbound / outbound) arrives, the policy picks an action, and the action is turned
-into an ordered list of crane instructions: for an outbound, the MinMax reshuffler is
-dry-run on a copy of the grid to produce each relocation, then the retrieve. Steps are
-applied one at a time (Next) or all at once (Complete). No UI code here.
-
-Moved unchanged in behaviour from the legacy Streamlit ops dashboard.
-"""
+"""Order-at-a-time yard operation: turns a policy action into crane instruction steps
+(reshuffles, then place/retrieve) and applies them one at a time."""
 import dataclasses
 
 import numpy as np
@@ -27,7 +20,7 @@ class LiveOrderRun:
     def __init__(self, depot_cfg, reward_cfg, policy, warmstart=0.4, seed=42):
         self._depot_cfg = depot_cfg
         self._reward_cfg = reward_cfg
-        self.policy = policy          # anything with .act(env) -> int (depot.inference.Policy)
+        self.policy = policy          # object with .act(env) -> int
         self._warmstart = warmstart
         self.rng = np.random.default_rng(seed)
         self.reset()
@@ -63,7 +56,7 @@ class LiveOrderRun:
             return "inbound" if self.rng.random() < 0.7 else "outbound"
         return "inbound" if can_in else ("outbound" if can_out else None)
 
-    # ── Step planning — runs reshuffler on a copy, never touches the real grid ─
+    # ── Step planning — dry run, never touches the real grid ─────────────────
 
     def _plan(self, action) -> list[dict]:
         decoded = self.env.decode_action(action)
@@ -76,11 +69,8 @@ class LiveOrderRun:
                               f"Block {bl+1} · Bay {ba+1} · Row {r+1} · Tier {h+1}")}]
 
         _, bl, ba, r, h = decoded
-        # Run reshuffler on a grid copy to capture the move sequence
+        moves = self.env.plan_relocations(bl, ba, r, h)
         saved = self.env.grid
-        self.env.grid = saved.copy()
-        moves = self.env.reshuffler.relocate_above(bl, ba, r, h)
-        self.env.grid = saved   # restore real grid
 
         steps: list[dict] = []
         for mv in moves:
@@ -172,7 +162,7 @@ class LiveOrderRun:
 
     def press_next(self):
         """Apply the current pending step and advance to the next."""
-        if self.has_next:      # no-op before the first order (step_idx == -1) or when done
+        if self.has_next:
             self._apply(self.steps[self.step_idx])
             self.step_idx += 1
 

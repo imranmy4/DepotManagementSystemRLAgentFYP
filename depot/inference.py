@@ -1,14 +1,9 @@
-"""Load a trained run and pick actions with it — the one place that knows how.
+"""Load a trained model bundle (model, VecNormalize stats, config) and pick actions with it.
 
-A run is only usable as a bundle: model + its VecNormalize stats + the config it was trained
-with (the observation layout depends on the yard dimensions). Policy.load resolves all three
-from the run folder, so callers (evaluation, the API) never load a model without its
-normalizer.
-
-    policy = Policy.load("full")               # CURRENT run of an experiment
-    policy = Policy.load("full", run="run_…")  # a specific run (id or path)
+    policy = Policy.load(runs.resolve_run_dir())   # a training run (CURRENT by default)
+    policy = Policy.load(paths.DEPLOY_MODEL_DIR)   # the promoted deployment model
     env = DepotEnv(policy.depot_config, reward_config=policy.reward_config)
-    action = policy.act(env)                   # masked, deterministic by default
+    action = policy.act(env)                       # masked, deterministic by default
 """
 import os
 from dataclasses import dataclass
@@ -18,7 +13,7 @@ from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from depot import runs
-from depot.config import load_eval_config
+from depot.config import load_run_config
 from depot.env import DepotEnv, DepotConfig
 from depot.reward import RewardConfig
 
@@ -29,28 +24,28 @@ class Policy:
     vecnorm: VecNormalize
     depot_config: DepotConfig
     reward_config: RewardConfig
-    run_dir: str
+    model_dir: str
     model_name: str          # e.g. "best_model" / "depot_ppo_final"
 
     @classmethod
-    def load(cls, experiment, run=None, depot_config=None):
-        """Load the default model of a run (best_model, else final — see runs.resolve_model).
+    def load(cls, model_dir, depot_config=None):
+        """Load the default model of a folder (best_model, else final; see runs.resolve_model).
 
-        `depot_config` overrides the run's saved depot config (e.g. stress scenarios). Only
+        `depot_config` overrides the saved depot config (e.g. stress scenarios). Only
         change demand / initial-state fields: changing yard dimensions breaks the model.
-        Raises FileNotFoundError if the run has no loadable model.
+        Raises FileNotFoundError if the folder has no loadable model or config snapshot.
         """
-        run_dir = runs.resolve_run_dir(experiment, run)
-        saved_depot, reward_config = load_eval_config(experiment, run_dir)
+        model_dir = str(model_dir)
+        saved_depot, reward_config = load_run_config(model_dir)
         depot_config = depot_config or saved_depot
-        model_path, vecnorm_path = runs.resolve_model(run_dir)
+        model_path, vecnorm_path = runs.resolve_model(model_dir)
         if model_path is None:
-            raise FileNotFoundError(f"no loadable model (+ normalizer) in {run_dir}")
+            raise FileNotFoundError(f"no loadable model (+ normalizer) in {model_dir}")
 
         vecnorm = VecNormalize.load(vecnorm_path, DummyVecEnv([lambda: DepotEnv(depot_config)]))
         vecnorm.training = False
         model = MaskablePPO.load(model_path)
-        return cls(model, vecnorm, depot_config, reward_config, run_dir,
+        return cls(model, vecnorm, depot_config, reward_config, model_dir,
                    os.path.basename(model_path))
 
     def act(self, env, obs=None, deterministic=True) -> int:

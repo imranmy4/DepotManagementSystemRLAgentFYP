@@ -1,14 +1,11 @@
-"""Config: INI file <-> dataclasses <-> CLI overrides, plus the named experiments.
-
-Shared by training/ (to build a run's config) and deploy/ (to rebuild the env exactly as a
-run was trained, from its config_used.ini snapshot).
+"""Config: INI file <-> dataclasses <-> CLI overrides.
 
 The dataclasses (DepotConfig, RewardConfig, TrainConfig) are the single source of
 truth for field names, types, and defaults. This module just moves values between
 them, a config.ini, and argparse — it hardcodes no field names itself.
 
 Precedence (lowest to highest):
-    dataclass defaults  <  config.ini  <  (experiment delta)  <  CLI override
+    dataclass defaults  <  config.ini  <  CLI override
 
 Typical use:
     parser = read_ini()                                      # configs/config.ini
@@ -116,60 +113,12 @@ class TrainConfig:
     torch_threads: int = 4
 
 
-# Varied conditions per episode: fill 30-85%, half the episodes start from a messy
-# mixed-age yard, inbound/outbound caps each shifted by up to ±3.
-ROBUST_DEPOT = dict(warmstart=0.3, warmstart_max=0.85, warmstart_aged=0.5, demand_jitter=3)
-
-# Lean reward: drop terms that overlap with others. Kept: reshuffle (scope-scaled), burial
-# (capped), dwell on retrieval + per-tick mean idle, cliff, and a linear travel penalty
-# (threshold_divisor=100 makes the threshold 1, so every move costs -w_travel*dist and the
-# short-move compensation never applies).
-LEAN_REWARD = dict(w_height=0.0, w_profile=0.0, w_center=0.0, w_max_idle=0.0,
-                   w_travel_compensate=0.0, threshold_divisor=100)
-
-# Each experiment is a delta applied on top of the config.ini base. "full" = base.
-EXPERIMENTS = {
-    "full": {},
-
-    # Sanity check: tiny depot, short budget, single env.
-    "tiny": {
-        "depot": dict(n_blocks=2, n_bays=2, n_rows=2, n_tiers=2, n_ticks=10, max_in=2, max_out=2),
-        "train": dict(total_timesteps=100_000, n_envs=1, n_steps=512, batch_size=64),
-    },
-
-    # ---- Config-only ablations on the full config -------------------------
-    "abl_reshuffle_count_only": {
-        "reward": dict(reshuffle_mult_same=1.0, reshuffle_mult_adjacent=1.0, reshuffle_mult_far=1.0),
-    },
-    "abl_travel_div3":     {"reward": dict(threshold_divisor=3)},
-    "abl_travel_div4":     {"reward": dict(threshold_divisor=4)},
-    "abl_dwell_heavy":     {"reward": dict(w_dwell=2.0)},
-    "abl_travel_heavy":    {"reward": dict(w_travel=0.6)},
-    "abl_reshuffle_heavy": {"reward": dict(w_reshuffle=2.0)},
-    "abl_shape_off":       {"reward": dict(w_cliff=0.0, w_profile=0.0, w_center=0.0)},
-    "abl_center_off":      {"reward": dict(w_center=0.0)},
-
-    # Robust training on varied conditions, with the full reward and with the lean reward.
-    "robust":      {"depot": ROBUST_DEPOT},
-    "robust_lean": {"depot": ROBUST_DEPOT, "reward": LEAN_REWARD},
-    "abl_burial_uncapped": {"reward": dict(burial_cap=0.0)},
-}
-
-
-def resolve_config(experiment, args=None, ini_path=None):
-    """Build (DepotConfig, RewardConfig, TrainConfig) for an experiment.
-
-    Layers: config.ini base -> experiment delta -> CLI overrides (if args given).
-    """
+def resolve_config(args=None, ini_path=None):
+    """Build (DepotConfig, RewardConfig, TrainConfig) from config.ini plus CLI overrides."""
     parser = read_ini(ini_path)
     depot = load_dataclass(DepotConfig, parser, "depot")
     reward = load_dataclass(RewardConfig, parser, "reward")
     train_cfg = load_dataclass(TrainConfig, parser, "train")
-
-    delta = EXPERIMENTS[experiment]
-    depot = replace(depot, **delta.get("depot", {}))
-    reward = replace(reward, **delta.get("reward", {}))
-    train_cfg = replace(train_cfg, **delta.get("train", {}))
 
     if args is not None:
         depot = apply_cli(depot, args)
@@ -179,12 +128,10 @@ def resolve_config(experiment, args=None, ini_path=None):
     return depot, reward, train_cfg
 
 
-def load_eval_config(experiment, run_dir):
-    """(DepotConfig, RewardConfig) a run was trained with: its config_used.ini snapshot if
-    present, else resolved from configs/config.ini + the experiment delta."""
+def load_run_config(run_dir):
+    """(DepotConfig, RewardConfig) a run was trained with, from its config_used.ini snapshot."""
     snap = os.path.join(run_dir, "config_used.ini")
-    if os.path.exists(snap):
-        p = read_ini(snap)
-        return load_dataclass(DepotConfig, p, "depot"), load_dataclass(RewardConfig, p, "reward")
-    depot, reward, _ = resolve_config(experiment)
-    return depot, reward
+    if not os.path.exists(snap):
+        raise FileNotFoundError(f"no config_used.ini in {run_dir}")
+    p = read_ini(snap)
+    return load_dataclass(DepotConfig, p, "depot"), load_dataclass(RewardConfig, p, "reward")

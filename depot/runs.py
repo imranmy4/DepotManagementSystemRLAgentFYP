@@ -1,7 +1,7 @@
-"""Per-run model folder layout + resolution — shared by training/ and deploy/, so they all agree on where a run's artifacts live and which is "current".
+"""Per-run model folder layout, run/model resolution, and promotion to deployment.
 
 Layout:
-    models/<exp>/
+    models/
         <run_id>/                    # run_id = "run_YYYYmmdd-HHMMSS"
             config_used.ini          # resolved config snapshot (reproduce the env/reward)
             best_model.zip           # best eval-reward checkpoint (MaskableEvalCallback)
@@ -13,52 +13,53 @@ Layout:
             evaluations.npz          # eval-reward history
         CURRENT                      # text file naming the default run_id
 
-Why a CURRENT pointer (not a flat current_model.zip): a model is only usable together with
-its normalizer + config, which live in the run dir — pointing at the dir keeps the bundle
-together and avoids the "model without normalizer" footgun.
+A model is only usable together with its normalizer and config, so runs are always handled
+as whole folders (CURRENT names a folder, promote copies the bundle).
 """
 import os
 import glob
+import shutil
 import time
 
 from depot import paths
+
+# Files copied into the deployment model folder; SOURCE records where they came from.
+BUNDLE_FILES = ("config_used.ini", "best_model.zip", "best_vec_normalize.pkl",
+                "depot_ppo_final.zip", "vec_normalize.pkl", "SOURCE")
 
 
 def new_run_id():
     return time.strftime("run_%Y%m%d-%H%M%S")
 
 
-def exp_dir(experiment):
-    return os.path.join(paths.MODELS_DIR, experiment)
+def run_dir(run_id):
+    return os.path.join(paths.MODELS_DIR, run_id)
 
 
-def write_current(experiment, run_id):
-    """Point CURRENT at run_id (the default run for eval/dashboard)."""
-    with open(os.path.join(exp_dir(experiment), "CURRENT"), "w") as fh:
+def write_current(run_id):
+    """Point CURRENT at run_id (the default run for evaluation and the dashboards)."""
+    with open(os.path.join(paths.MODELS_DIR, "CURRENT"), "w") as fh:
         fh.write(run_id)
 
 
-def latest_run_dir(experiment):
-    runs = sorted(glob.glob(os.path.join(exp_dir(experiment), "run_*")))
-    return runs[-1] if runs else None
+def latest_run_dir():
+    found = sorted(glob.glob(os.path.join(paths.MODELS_DIR, "run_*")))
+    return found[-1] if found else None
 
 
-def resolve_run_dir(experiment, run=None):
-    """Directory holding the run to load. Precedence:
-    explicit `run` (id or path) > CURRENT pointer > newest run_* subdir >
-    legacy flat models/<exp>/ (pre-per-run layout, for backward compatibility).
+def resolve_run_dir(run=None):
+    """Directory of the run to load: explicit `run` (id or path) > CURRENT > newest run.
+
+    Raises FileNotFoundError if no such run exists.
     """
-    ed = exp_dir(experiment)
     if run:
-        return run if os.path.isdir(run) else os.path.join(ed, run)
-    cur = os.path.join(ed, "CURRENT")
-    if os.path.exists(cur):
-        rid = open(cur).read().strip()
-        d = os.path.join(ed, rid)
-        if os.path.isdir(d):
-            return d
-    latest = latest_run_dir(experiment)
-    return latest if latest else ed
+        d = run if os.path.isdir(run) else run_dir(run)
+    else:
+        cur = os.path.join(paths.MODELS_DIR, "CURRENT")
+        d = run_dir(open(cur).read().strip()) if os.path.exists(cur) else latest_run_dir()
+    if not d or not os.path.isdir(d):
+        raise FileNotFoundError(f"no run found ({run or 'CURRENT / latest'}) in {paths.MODELS_DIR}")
+    return d
 
 
 def resolve_model(run_dir):
@@ -95,3 +96,27 @@ def latest_checkpoint(run_dir, name_prefix="depot_ppo"):
     n = stepnum(latest)
     vn = os.path.join(run_dir, f"{name_prefix}_vecnormalize_{n}_steps.pkl")
     return latest[:-4], (vn if os.path.exists(vn) else None), n
+
+
+def promote(src_run_dir, dest=None):
+    """Copy a run's default model, its normalizer and config snapshot into the deployment
+    model folder (replacing what was there). Returns the SOURCE label, e.g.
+    "run_20261101-041443/best_model"."""
+    dest = str(dest or paths.DEPLOY_MODEL_DIR)
+    model_path, vn_path = resolve_model(src_run_dir)
+    snap = os.path.join(src_run_dir, "config_used.ini")
+    if model_path is None or not os.path.exists(snap):
+        raise FileNotFoundError(f"no loadable model + config_used.ini in {src_run_dir}")
+
+    os.makedirs(dest, exist_ok=True)
+    for name in BUNDLE_FILES:
+        old = os.path.join(dest, name)
+        if os.path.exists(old):
+            os.remove(old)
+    for f in (snap, model_path + ".zip", vn_path):
+        shutil.copy2(f, os.path.join(dest, os.path.basename(f)))
+
+    source = f"{os.path.basename(os.path.normpath(src_run_dir))}/{os.path.basename(model_path)}"
+    with open(os.path.join(dest, "SOURCE"), "w") as fh:
+        fh.write(source)
+    return source

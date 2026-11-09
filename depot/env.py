@@ -433,6 +433,16 @@ class DepotEnv(gym.Env):
         self.n_out_remaining -= 1
         return dist, reshuffle_dists, reshuffle_moves
 
+    def plan_relocations(self, bl: int, ba: int, r: int, h: int) -> list:
+        """Relocations the reshuffler would make to retrieve (bl, ba, r, h), without changing
+        the grid. Same move tuples as MinMaxReshuffler.relocate_above."""
+        saved = self.grid
+        self.grid = saved.copy()
+        try:
+            return self.reshuffler.relocate_above(bl, ba, r, h)
+        finally:
+            self.grid = saved
+
     def _advance_tick(self):
         """End-of-tick: age containers, increment tick, draw the next actionable demand."""
         self.grid[self.grid >= 0] += 1
