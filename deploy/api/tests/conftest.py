@@ -1,26 +1,30 @@
-"""Fixtures for database tests: a fresh `depot_test` database built by the Alembic migrations,
-and a per-test session that is rolled back afterwards.
+"""Fixtures: a fresh `depot_test` database built by the Alembic migrations, a per-test
+session that is rolled back afterwards, a committed database for worker tests, and Redis db 15.
 
-Needs the Postgres container running (cd deploy && docker compose up -d); skipped otherwise.
+Needs the Postgres and Redis containers running (cd deploy && docker compose up -d);
+dependent tests are skipped otherwise.
 """
 import os
 
-# Must be set before app.settings is imported, so nothing can touch the real database.
+# Must be set before app.settings is imported, so nothing can touch the real database / queue.
 os.environ["POSTGRES_DB"] = os.environ.get("DEPOT_TEST_DB", "depot_test")
+os.environ["REDIS_URL"] = os.environ.get("DEPOT_TEST_REDIS_URL", "redis://localhost:6379/15")
 
 from pathlib import Path
 
 import psycopg
 import pytest
+import redis
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.settings import settings
 from helpers import TINY
 
 assert settings.postgres_db.endswith("_test"), "tests must run against a *_test database"
+assert settings.redis_url.endswith("/15"), "tests must run against Redis db 15"
 
 API_DIR = Path(__file__).resolve().parents[1]
 
@@ -58,3 +62,30 @@ def yard(session):
     from app.db.seed import seed_layout
     seed_layout(session, TINY)
     return session
+
+
+@pytest.fixture
+def committed(engine):
+    """Database with the TINY layout where code commits for real (worker tests); emptied after."""
+    from app.db.seed import seed_layout
+    from app.db.session import SessionLocal
+    with SessionLocal.begin() as s:
+        seed_layout(s, TINY)
+    yield SessionLocal
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE move_log, orders, container_location, container, yard_state, "
+                          "slot, yard_block RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture
+def r():
+    """Empty Redis db 15."""
+    from app import order_queue
+    client = order_queue.connect()
+    try:
+        client.ping()
+    except redis.ConnectionError as e:
+        pytest.skip(f"Redis not reachable: {e}")
+    client.flushdb()
+    yield client
+    client.flushdb()

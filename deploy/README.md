@@ -16,7 +16,10 @@ deploy/
       settings.py      # .env settings
       iso6346.py       # container number validation
       adapter.py       # DB -> env -> policy -> planned crane moves
+      order_queue.py   # Redis lists of order ids (outbound first, FIFO per type)
+      worker.py        # the single worker: plans one order at a time
       db/              # models, session, seed (yard layout), operations (order flow)
-  docker-compose.yml   # postgres; planned: redis, api, web
+  docker-compose.yml   # postgres, redis; planned: api, web
 ```
-Planned: Redis queue + worker, FastAPI endpoints, `web/` frontend.
+Run from `deploy/api`: `python -m alembic upgrade head`, `python -m app.db.seed`,
+`python -m app.worker`. Planned: FastAPI endpoints, `web/` frontend.
