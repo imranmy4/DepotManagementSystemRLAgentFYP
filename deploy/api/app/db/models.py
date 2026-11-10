@@ -145,6 +145,7 @@ class Order(Base):
     truck_no: Mapped[str | None] = mapped_column(String(20))
     # Policy that processed the order, e.g. "run_20261101-041443/best_model".
     decided_by: Mapped[str | None] = mapped_column(String(200))
+    reject_reason: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP)
     __table_args__ = (
@@ -152,6 +153,8 @@ class Order(Base):
                         name="inbound_has_container"),
         CheckConstraint("status <> 'done' OR (container_no IS NOT NULL AND completed_at IS NOT NULL)",
                         name="done_is_complete"),
+        CheckConstraint("status <> 'rejected' OR reject_reason IS NOT NULL",
+                        name="rejected_has_reason"),
         Index("ix_orders_status", "status"),
         # Lookup of a container's arrival time.
         Index("ix_orders_container_completed", "container_no", "completed_at"),
