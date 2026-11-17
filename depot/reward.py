@@ -1,5 +1,6 @@
-"""Reward terms of the depot env: burial and cliff on inbound; dwell, travel, reshuffle and cliff
-on outbound; mean idle per tick.
+"""Reward terms of the depot env: burial and cliff (towers) on inbound; dwell, travel and reshuffle
+on outbound; mean idle per tick. Retrieval is priced only by the ranked operational terms; stack
+shape is a placement concern.
 
 Weights follow the operators' ranking reshuffle > crane travel > dwell time: the full range of
 each less important term fits under one unit of the next (travel 0.3 x max distance 9 = 2.7 < one
@@ -28,9 +29,9 @@ class RewardConfig:
     reshuffle_mult_adjacent: float = 2.0  # destination one block away
     reshuffle_mult_far:      float = 3.0  # destination >= 2 blocks away
 
-    # Stack shape: penalise height gaps to in-block neighbours beyond cliff_tol tiers (towers on
-    # inbound, pits on outbound), as the MEAN excess over the neighbours so centre, edge and
-    # corner stacks pay the same for the same steepness.
+    # Stack shape (inbound): penalise a stack standing more than cliff_tol tiers above its in-block
+    # neighbours (a tower), as the MEAN excess over the neighbours so centre, edge and corner
+    # stacks pay the same for the same steepness.
     w_cliff:             float = 15.0
     cliff_tol:           int   = 1
 
@@ -66,10 +67,9 @@ class RewardCalculator:
 
     # ─── Shape (post-action grid) ────────────────────────────────────
 
-    def cliff_penalty(self, bl: int, ba: int, r: int, outbound: bool) -> float:
-        """Penalty for height gaps > cliff_tol between stack (bl, ba, r) and its in-block
-        neighbours, averaged over the neighbours. Inbound: the stack standing above its
-        neighbours (tower). Outbound: the stack sunk below its neighbours (pit)."""
+    def cliff_penalty(self, bl: int, ba: int, r: int) -> float:
+        """Penalty for stack (bl, ba, r) standing more than cliff_tol tiers above its in-block
+        neighbours (a tower), averaged over the neighbours."""
         if self.config.w_cliff == 0:
             return 0.0
         h = (self.env.grid[bl] >= 0).sum(axis=2)            # (Ba, R) heights in this block
@@ -77,8 +77,7 @@ class RewardCalculator:
         excess, n_nb = 0, 0
         for nba, nr in ((ba - 1, r), (ba + 1, r), (ba, r - 1), (ba, r + 1)):
             if 0 <= nba < self.env.Ba and 0 <= nr < self.env.R:
-                gap = hs - int(h[nba, nr]) if not outbound else int(h[nba, nr]) - hs
-                excess += max(0, gap - self.config.cliff_tol)
+                excess += max(0, hs - int(h[nba, nr]) - self.config.cliff_tol)
                 n_nb += 1
         return -self.config.w_cliff * excess / n_nb if n_nb else 0.0
 
@@ -111,16 +110,14 @@ class RewardCalculator:
     def compute_inbound_step(self, bl, ba, r) -> tuple[float, dict]:
         breakdown = {
             "burial": self.burial_penalty(bl, ba, r),
-            "cliff":  self.cliff_penalty(bl, ba, r, outbound=False),
+            "cliff":  self.cliff_penalty(bl, ba, r),
         }
         return sum(breakdown.values()), breakdown
 
-    def compute_outbound_step(self, retrieved_dwell, dist, reshuffle_dists, stack) -> tuple[float, dict]:
-        """`stack` = (bl, ba, r) retrieved from; the cliff (pit) term is measured there."""
+    def compute_outbound_step(self, retrieved_dwell, dist, reshuffle_dists) -> tuple[float, dict]:
         breakdown = {
             "dwell":     self.dwell_reward(retrieved_dwell),
             "travel":    self.travel_penalty(dist),
             "reshuffle": self.reshuffle_penalty(reshuffle_dists),
-            "cliff":     self.cliff_penalty(*stack, outbound=True),
         }
         return sum(breakdown.values()), breakdown

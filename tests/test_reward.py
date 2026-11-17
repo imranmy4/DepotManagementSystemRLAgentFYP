@@ -125,16 +125,22 @@ def test_step_returns_breakdown_in_info():
     assert len(info["reward_breakdown"]) > 0
 
 
-def test_cliff_penalty_tower_and_pit():
+def test_cliff_penalty_tower():
     env = fresh_env(RewardConfig(w_cliff=1.0, cliff_tol=1))
     env.grid[:] = -1
     env.grid[0, 1, 1, :4] = 0        # tower of 4 in the middle of an empty block
-    # Inbound view: 4 neighbours each 4 tiers lower -> excess 3 each, mean 3
-    assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == -3.0
-    # Outbound view of an edge neighbour (3 neighbours, only the tower is taller): 3 / 3
-    assert env.reward_calc.cliff_penalty(0, 0, 1, outbound=True) == -1.0
+    # 4 neighbours each 4 tiers lower -> excess 3 each, mean 3
+    assert env.reward_calc.cliff_penalty(0, 1, 1) == -3.0
+    # A stack lower than its neighbours (a pit) is not penalised
+    assert env.reward_calc.cliff_penalty(0, 0, 1) == 0.0
     env.grid[0, 1, 1, 1:] = -1       # tower now height 1: within tolerance
-    assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == 0.0
+    assert env.reward_calc.cliff_penalty(0, 1, 1) == 0.0
+
+
+def test_outbound_step_has_no_shape_term():
+    env = fresh_env()
+    _, breakdown = env.reward_calc.compute_outbound_step(10, 2, [0])
+    assert set(breakdown) == {"dwell", "travel", "reshuffle"}
 
 
 def test_cliff_ignores_other_blocks():
@@ -143,7 +149,7 @@ def test_cliff_ignores_other_blocks():
     env.grid[1, :, :, :] = 0         # block 1 full; block 0 empty
     env.grid[0, 3, 0, 0] = 0         # edge stack of block 0, next to block 1 in index order
     # Only in-block neighbours (all empty) count: corner, 2 neighbours x gap 1, mean 1
-    assert env.reward_calc.cliff_penalty(0, 3, 0, outbound=False) == -1.0
+    assert env.reward_calc.cliff_penalty(0, 3, 0) == -1.0
 
 
 def test_cliff_same_cost_corner_edge_centre():
@@ -154,7 +160,7 @@ def test_cliff_same_cost_corner_edge_centre():
         env.grid[:] = -1
         env.grid[0, :, :, :3] = 0                   # flat block at height 3
         env.grid[0, s[0], s[1], :5] = 0             # this stack at height 5
-        costs.append(env.reward_calc.cliff_penalty(0, *s, outbound=False))
+        costs.append(env.reward_calc.cliff_penalty(0, *s))
     assert costs == [-15.0, -15.0, -15.0], costs
 
 

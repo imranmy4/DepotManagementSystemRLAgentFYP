@@ -112,7 +112,7 @@ class DashboardRun:
             _, bl, ba, r, h = decoded
             retrieved = int(env.grid[bl, ba, r, h])      # read dwell BEFORE removal
             dist, rd, reshuffle_moves = env._apply_outbound(bl, ba, r, h)
-            reward, _ = env.reward_calc.compute_outbound_step(retrieved, dist, rd, (bl, ba, r))
+            reward, _ = env.reward_calc.compute_outbound_step(retrieved, dist, rd)
             self.total_reward += reward
             self.total_travel += dist
             self.total_reshuffles += len(rd)
