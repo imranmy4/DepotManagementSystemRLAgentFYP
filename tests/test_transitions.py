@@ -156,3 +156,27 @@ if __name__ == "__main__":
     test_tick_advances_when_both_queues_empty()
     test_full_episode_runs_to_termination()
     print("\nAll transition tests passed ✓")
+
+def test_sorted_warmstart_oldest_at_bottom():
+    from depot.env import DepotConfig, DepotEnv
+    env = DepotEnv(DepotConfig(warmstart=0.6, warmstart_age_mean=29, warmstart_age_max=90))
+    env.reset(seed=3)
+    g = env.grid
+    assert abs((g >= 0).mean() - 0.6) < 0.01
+    assert g.max() <= 90 and g[g >= 0].mean() > 5
+    occ = g >= 0
+    # Within each stack, occupied tiers are contiguous from the bottom and ages never increase upward.
+    assert (occ[..., 1:] <= occ[..., :-1]).all()
+    both = occ[..., 1:] & occ[..., :-1]
+    assert (g[..., 1:][both] <= g[..., :-1][both]).all()
+
+
+def test_warmstart_fill_range_drawn_per_episode():
+    from depot.env import DepotConfig, DepotEnv
+    env = DepotEnv(DepotConfig(warmstart=0.0, warmstart_max=0.95, warmstart_age_mean=29,
+                               max_in=0, max_out=0, n_ticks=1))
+    fills = []
+    for seed in range(40):
+        env.reset(seed=seed)
+        fills.append((env.grid >= 0).mean())
+    assert min(fills) < 0.2 and max(fills) > 0.75 and max(fills) <= 0.951

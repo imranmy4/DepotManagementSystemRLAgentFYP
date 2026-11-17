@@ -64,6 +64,24 @@ def nearest_action(env, rng):
 #  w_travel / w_dwell = 0.3 / 0.5 ≈ 0.5 tick per unit of crane travel).
 PLANNER_RESHUFFLE_TICKS = 6.0
 PLANNER_TRAVEL_TICKS = 0.5
+PLANNER_PROFILE_STEP = 1      # pyramid: height cap drops one tier per ring towards the block edge
+
+
+def block_rings(Ba: int, R: int):
+    """(Ba, R) ring index of each stack in a block (0 = outer edge) and the innermost
+    ring index. e.g. 4x4 -> outer 12 stacks ring 0, inner 2x2 ring 1."""
+    ba = np.arange(Ba).reshape(Ba, 1)
+    r = np.arange(R).reshape(1, R)
+    ring = np.minimum(np.minimum(ba, Ba - 1 - ba), np.minimum(r, R - 1 - r))
+    return ring, (min(Ba, R) - 1) // 2
+
+
+def profile_caps(Ba: int, R: int, H: int, step: int) -> np.ndarray:
+    """(Ba, R) pyramid height caps for one block: H in the innermost ring, dropping
+    `step` tiers per ring towards the edge (never below 1).
+    e.g. 4x4, H=6, step=1 -> outer 12 stacks cap 5, inner 2x2 cap 6."""
+    ring, inner = block_rings(Ba, R)
+    return np.maximum(1, H - step * (inner - ring))
 
 
 def planner_action(env, rng):
@@ -91,8 +109,10 @@ def planner_action(env, rng):
                           - PLANNER_TRAVEL_TICKS * dist)
         return _pick_best(valid, scores, rng, maximize=True)
 
-    rc = env.reward_calc
-    tol = rc.config.cliff_tol
+    tol = env.reward_calc.config.cliff_tol
+    caps = profile_caps(env.Ba, env.R, env.H, PLANNER_PROFILE_STEP)
+    ring, inner = block_rings(env.Ba, env.R)
+    center_depth = ring / inner if inner > 0 else np.zeros_like(ring, dtype=float)
     stack_max = env.grid.max(axis=3)                              # -1 for empty stacks
     keys = []
     for _, bl, ba, r in decoded:
@@ -101,8 +121,8 @@ def planner_action(env, rng):
         for nba, nr in ((ba - 1, r), (ba + 1, r), (ba, r - 1), (ba, r + 1)):
             if 0 <= nba < env.Ba and 0 <= nr < env.R:
                 excess += max(0, new_h - int(heights[bl, nba, nr]) - tol)
-        unsafe = excess + max(0, new_h - int(rc.profile_caps[ba, r]))
-        keys.append((unsafe, int(stack_max[bl, ba, r]), new_h, -float(rc.center_depth[ba, r])))
+        unsafe = excess + max(0, new_h - int(caps[ba, r]))
+        keys.append((unsafe, int(stack_max[bl, ba, r]), new_h, -float(center_depth[ba, r])))
     best = min(keys)
     tied = valid[[k == best for k in keys]]
     return int(rng.choice(tied))

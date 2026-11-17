@@ -17,9 +17,9 @@ Output:
      best on it, with the % difference and a ✓/✗.
   3. DETAILS — per-episode totals, retrieval block jumps, and yard shape.
 
-With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 30/50/70/85%,
-new vs mixed-age pre-fill, inbound/outbound-heavy demand), printing a summary table per
-scenario, overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
+With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 0% to 95%,
+ages long-tailed and sorted oldest-at-the-bottom), printing a summary table per scenario,
+overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
     python training/evaluate.py --stress
 """
 import os
@@ -248,18 +248,10 @@ def _verdict(perf, agent="Agent"):
 
 
 # Stress grid: fixed conditions (per-episode randomisation off), every policy, same seeds.
-STRESS_SCENARIOS = [
-    ("30% new",                dict(warmstart=0.3)),
-    ("30% mixed",              dict(warmstart=0.3, warmstart_aged=1.0)),
-    ("50% new",                dict(warmstart=0.5)),
-    ("50% mixed",              dict(warmstart=0.5, warmstart_aged=1.0)),
-    ("70% new",                dict(warmstart=0.7)),
-    ("70% mixed",              dict(warmstart=0.7, warmstart_aged=1.0)),
-    ("85% new",                dict(warmstart=0.85)),
-    ("85% mixed",              dict(warmstart=0.85, warmstart_aged=1.0)),
-    ("50% mixed, in-heavy",    dict(warmstart=0.5, warmstart_aged=1.0, max_in=12, max_out=8)),
-    ("50% mixed, out-heavy",   dict(warmstart=0.5, warmstart_aged=1.0, max_in=8, max_out=12)),
-]
+# Fixed pre-fill levels with sorted, long-tailed ages (the conditions the agent is trained on).
+STRESS_AGES = dict(warmstart_aged=0.0, warmstart_age_mean=29.0, warmstart_age_max=90)
+STRESS_SCENARIOS = [(f"fill {int(f * 100)}%", dict(warmstart=f, **STRESS_AGES))
+                    for f in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)]
 STRESS_N_EPISODES = 30
 
 
@@ -315,8 +307,8 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
           f"{model_name or 'no model found — baselines only'}")
     print(f"  yard:  {_describe_yard(fixed)}; base demand in 0-{fixed.max_in} / "
           f"out 0-{fixed.max_out} per tick")
-    print("  'new' = pre-filled containers all age 0 (an already age-sorted yard);")
-    print("  'mixed' = random ages (a messy yard). in/out-heavy = demand caps 12/8 and 8/12.")
+    print("  fill = pre-filled share of capacity; pre-filled ages long-tailed (mean 29, max 90)")
+    print("  and sorted per stack with the oldest at the bottom.")
     print("=" * 78)
 
     scen_perf = {}
@@ -386,7 +378,8 @@ def main():
           f"{model_name or 'no model found — baselines only'}")
     print(f"  yard:  {_describe_yard(d)}, warmstart {d.warmstart:.0%}"
           f"{f'-{d.warmstart_max:.0%}' if d.warmstart_max > d.warmstart else ''}"
-          f"{f' (mixed ages p={d.warmstart_aged:g})' if d.warmstart_aged else ''}, "
+          f"{f' (mixed ages p={d.warmstart_aged:g})' if d.warmstart_aged else ''}"
+          f"{f' (sorted ages, mean {d.warmstart_age_mean:g})' if d.warmstart_age_mean else ''}, "
           f"demand in 0-{d.max_in} / out 0-{d.max_out} per tick"
           f"{f' (±{d.demand_jitter} per episode)' if d.demand_jitter else ''}")
     print(f"  mean occupancy: {next(iter(perf.values()))['occ%']:.0f}%  "

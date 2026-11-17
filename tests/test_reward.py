@@ -1,6 +1,11 @@
+"""Tests for the reward terms and how the env applies them."""
+import configparser
+
 import numpy as np
+
+from depot.config import load_dataclass
 from depot.env import DepotEnv, DepotConfig
-from depot.reward import RewardConfig, RewardCalculator
+from depot.reward import RewardConfig
 
 
 def fresh_env(reward_config=None, **cfg):
@@ -9,163 +14,106 @@ def fresh_env(reward_config=None, **cfg):
     return env
 
 
-def test_action_bonus_is_constant():
-    env = fresh_env(RewardConfig(w_action_bonus=0.5))
-    assert env.reward_calc.action_bonus() == 0.5
-    print("Action bonus ✓")
-
-
-def test_burial_penalty_empty_stack_is_zero():
-    env = fresh_env()
-    env.grid[0, 0, 0, :] = -1
-    assert env.reward_calc.burial_penalty(0, 0, 0) == 0.0
-    print("Burial penalty empty stack = 0 ✓")
-
-
-def test_burial_penalty_scales_with_oldest():
+def test_burial_free_on_empty_stack():
     env = fresh_env(RewardConfig(w_burial=1.0))
-    env.grid[0, 0, 0, 0] = 3
-    env.grid[0, 0, 0, 1] = 7  # oldest
-    env.grid[0, 0, 0, 2] = 2
-    penalty = env.reward_calc.burial_penalty(0, 0, 0)
-    assert penalty == -7.0, f"Expected -7.0, got {penalty}"
-    print("Burial penalty scales with oldest container ✓")
+    env.grid[0, 0, 0, :] = -1
+    env.grid[0, 0, 0, 0] = 0                 # the container just placed
+    assert env.reward_calc.burial_penalty(0, 0, 0) == 0.0
 
 
-def test_height_penalty_scales_with_height():
-    env = fresh_env(RewardConfig(w_height=0.5))
-    env.grid[0, 0, 0, 0] = 0
-    env.grid[0, 0, 0, 1] = 0
-    env.grid[0, 0, 0, 2] = 0  # height = 3
-    penalty = env.reward_calc.height_penalty(0, 0, 0)
-    assert penalty == -1.5, f"Expected -1.5, got {penalty}"
-    print("Height penalty scales with height ✓")
+def test_burial_scales_with_oldest_below():
+    env = fresh_env(RewardConfig(w_burial=1.0, burial_cap=100))
+    env.grid[0, 0, 0, :] = -1
+    env.grid[0, 0, 0, :4] = [3, 7, 2, 0]     # new container (0) on top; oldest below = 7
+    assert env.reward_calc.burial_penalty(0, 0, 0) == -8.0
+
+
+def test_burial_on_fresh_stack_still_costs():
+    env = fresh_env(RewardConfig(w_burial=2.0))
+    env.grid[0, 0, 0, :] = -1
+    env.grid[0, 0, 0, :2] = [0, 0]
+    assert env.reward_calc.burial_penalty(0, 0, 0) == -2.0
+
+
+def test_burial_cap_limits_penalty():
+    env = fresh_env(RewardConfig(w_burial=1.0, burial_cap=5))
+    env.grid[0, 0, 0, :] = -1
+    env.grid[0, 0, 0, :2] = [20, 0]
+    assert env.reward_calc.burial_penalty(0, 0, 0) == -6.0, "Capped at 5 -> -(5 + 1)"
+    env.grid[0, 0, 0, :2] = [3, 0]
+    assert env.reward_calc.burial_penalty(0, 0, 0) == -4.0, "Below the cap is unchanged"
+
+
+def test_inbound_step_on_empty_stack_has_no_burial():
+    env = fresh_env(RewardConfig(w_burial=2.0, w_cliff=0.0))
+    env.grid[:] = -1
+    env.mode, env.n_in_remaining, env.n_out_remaining = 0, 2, 0
+    _, _, _, _, info = env.step(0)            # inbound into empty stack (0, 0, 0)
+    assert info["reward_breakdown"]["burial"] == 0.0
 
 
 def test_dwell_reward_proportional_to_dwell():
     env = fresh_env(RewardConfig(w_dwell=2.0))
-    reward = env.reward_calc.dwell_reward(5)
-    assert reward == 10.0, f"Expected 10.0, got {reward}"
-    print("Dwell reward proportional ✓")
+    assert env.reward_calc.dwell_reward(5) == 10.0
 
 
-def test_travel_reward_short_distance_compensated():
-    env = fresh_env(RewardConfig(
-        w_travel=1.0,
-        w_travel_compensate=0.5,
-        threshold_divisor=2,
-    ))
-    # max_dist for default config (B=6, Ba=4, R=4) with weights 1 = 5+3+3 = 11
-    # threshold = 11 / 2 = 5.5 (then capped via max(1, ...))
-    short_dist = 2.0
-    reward = env.reward_calc.travel_reward(short_dist)
-    assert reward > 0, f"Short move should be positive, got {reward}"
-    print("Travel: short distance compensated ✓")
-
-
-def test_travel_reward_long_distance_penalised():
-    env = fresh_env(RewardConfig(
-        w_travel=1.0,
-        w_travel_compensate=0.5,
-        threshold_divisor=2,
-    ))
-    long_dist = 10.0
-    reward = env.reward_calc.travel_reward(long_dist)
-    assert reward < 0, f"Long move should be negative, got {reward}"
-    print("Travel: long distance penalised ✓")
+def test_travel_penalty_linear():
+    env = fresh_env(RewardConfig(w_travel=0.5))
+    assert env.reward_calc.travel_penalty(0) == 0.0
+    assert env.reward_calc.travel_penalty(4) == -2.0
 
 
 def test_reshuffle_penalty_scales_with_count():
-    # All same-block moves (multiplier 1.0) → penalty scales with count
     env = fresh_env(RewardConfig(w_reshuffle=2.0))
     assert env.reward_calc.reshuffle_penalty([]) == 0.0
     assert env.reward_calc.reshuffle_penalty([0, 0, 0]) == -6.0
-    print("Reshuffle penalty scales linearly with count ✓")
 
 
 def test_reshuffle_penalty_scales_with_scope():
-    env = fresh_env(RewardConfig(
-        w_reshuffle=1.0,
-        reshuffle_mult_same=1.0,
-        reshuffle_mult_adjacent=2.0,
-        reshuffle_mult_far=4.0,
-    ))
-    # one same(1) + one adjacent(2) + one far(4) = 7
+    env = fresh_env(RewardConfig(w_reshuffle=1.0, reshuffle_mult_same=1.0,
+                                 reshuffle_mult_adjacent=2.0, reshuffle_mult_far=4.0))
     assert env.reward_calc.reshuffle_penalty([0, 1, 3]) == -7.0
-    print("Reshuffle penalty scales with scope ✓")
 
 
 def test_tick_penalty_zero_when_empty_yard():
     env = fresh_env()
     env.grid[:] = -1
     assert env.reward_calc.tick_penalty() == 0.0
-    print("Tick penalty = 0 on empty yard ✓")
 
 
-def test_tick_penalty_scales_with_dwell():
-    env = fresh_env(RewardConfig(w_mean_idle=1.0, w_max_idle=1.0))
+def test_tick_penalty_scales_with_mean_dwell():
+    env = fresh_env(RewardConfig(w_mean_idle=1.0))
     env.grid[:] = -1
     env.grid[0, 0, 0, 0] = 4
     env.grid[1, 1, 1, 0] = 8
-    # mean = 6, max = 8 → -(6 + 8) = -14
-    penalty = env.reward_calc.tick_penalty()
-    assert penalty == -14.0, f"Expected -14.0, got {penalty}"
-    print("Tick penalty: mean + max scaling ✓")
+    assert env.reward_calc.tick_penalty() == -6.0
+
+
+def test_every_skipped_tick_is_penalised():
+    """A step that ends several ticks pays the idle penalty of each, as containers age."""
+    env = fresh_env(RewardConfig(w_mean_idle=1.0), n_ticks=30)
+    env.grid[:] = -1
+    env.grid[0, 0, 0, 0] = 10
+    env._tick_penalty = 0.0
+    env._end_tick()
+    env._end_tick()
+    assert env._tick_penalty == -(11.0 + 12.0)
+    assert env.grid[0, 0, 0, 0] == 12
+
+
+def test_reset_skipped_ticks_age_containers():
+    env = DepotEnv(DepotConfig(warmstart=0.5, max_in=0, max_out=0, n_ticks=5))
+    env.reset(seed=0)                        # no demand: every tick is skipped
+    assert env.tick == 5
+    assert env.grid[env.grid >= 0].min() == 5
+    assert env._tick_penalty == 0.0
 
 
 def test_step_returns_breakdown_in_info():
     env = fresh_env(n_ticks=5)
-    mask = env.action_masks()
-    valid = np.where(mask)[0]
-    action = int(env.np_random.choice(valid))
-    obs, reward, terminated, truncated, info = env.step(action)
-    assert "reward_breakdown" in info
+    action = int(env.np_random.choice(np.flatnonzero(env.action_masks())))
+    _, _, _, _, info = env.step(action)
     assert len(info["reward_breakdown"]) > 0
-    print(f"Step breakdown: {info['reward_breakdown']} ✓")
-
-
-def test_episode_bonus_applied_at_termination():
-    env = fresh_env(
-        RewardConfig(
-            w_action_bonus=0.0,
-            w_burial=0.0,
-            w_height=0.0,
-            w_dwell=0.0,
-            w_travel=0.0,
-            w_travel_compensate=0.0,
-            w_reshuffle=0.0,
-            w_mean_idle=0.0,
-            w_max_idle=0.0,
-            w_episode_bonus=100.0,
-        ),
-        n_ticks=2,
-    )
-    final_reward = None
-    done = False
-    while not done:
-        mask = env.action_masks()
-        if not mask.any():
-            env._advance_tick()
-            done = env.tick >= env.config.n_ticks
-            if done:
-                # No step reward to test, force the bonus path differently
-                pass
-            continue
-        action = int(env.np_random.choice(np.where(mask)[0]))
-        obs, reward, terminated, truncated, info = env.step(action)
-        final_reward = reward
-        done = terminated or truncated
-    # Episode bonus should be present in the final step's reward
-    print(f"Final step reward: {final_reward} ✓")
-
-
-def test_profile_caps_pyramid():
-    from depot.reward import profile_caps
-    caps = profile_caps(4, 4, 6, 1)
-    assert caps[1:3, 1:3].tolist() == [[6, 6], [6, 6]], "Inner 2x2 capped at H"
-    assert caps[0, 0] == 5 and caps[0, 2] == 5 and caps[3, 1] == 5, "Edge ring capped at H-1"
-    assert (profile_caps(5, 5, 6, 1)[2, 2], profile_caps(5, 5, 6, 1)[0, 0]) == (6, 4)
-    print("Profile caps form a pyramid ✓")
 
 
 def test_cliff_penalty_tower_and_pit():
@@ -176,10 +124,8 @@ def test_cliff_penalty_tower_and_pit():
     assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == -3.0
     # Outbound view of an edge neighbour (3 neighbours, only the tower is taller): 3 / 3
     assert env.reward_calc.cliff_penalty(0, 0, 1, outbound=True) == -1.0
-    # Gap within tolerance costs nothing
-    env.grid[0, 1, 1, 1:] = -1       # tower now height 1
+    env.grid[0, 1, 1, 1:] = -1       # tower now height 1: within tolerance
     assert env.reward_calc.cliff_penalty(0, 1, 1, outbound=False) == 0.0
-    print("Cliff penalty: towers and pits ✓")
 
 
 def test_cliff_ignores_other_blocks():
@@ -189,17 +135,6 @@ def test_cliff_ignores_other_blocks():
     env.grid[0, 3, 0, 0] = 0         # edge stack of block 0, next to block 1 in index order
     # Only in-block neighbours (all empty) count: corner, 2 neighbours x gap 1, mean 1
     assert env.reward_calc.cliff_penalty(0, 3, 0, outbound=False) == -1.0
-    print("Cliff penalty is in-block only ✓")
-
-
-def test_profile_penalty_above_cap():
-    env = fresh_env(RewardConfig(w_profile=2.0, profile_step=1))
-    env.grid[:] = -1
-    env.grid[0, 0, 0, :] = 0         # edge stack at H=6, cap 5 -> 1 excess tier
-    env.grid[0, 1, 1, :] = 0         # centre stack at H=6, cap 6 -> fine
-    assert env.reward_calc.profile_penalty(0, 0, 0) == -2.0
-    assert env.reward_calc.profile_penalty(0, 1, 1) == 0.0
-    print("Profile penalty only above the cap ✓")
 
 
 def test_cliff_same_cost_corner_edge_centre():
@@ -212,56 +147,11 @@ def test_cliff_same_cost_corner_edge_centre():
         env.grid[0, s[0], s[1], :5] = 0             # this stack at height 5
         costs.append(env.reward_calc.cliff_penalty(0, *s, outbound=False))
     assert costs == [-15.0, -15.0, -15.0], costs
-    print("Cliff cost independent of position ✓")
 
 
-def test_burial_cap_limits_penalty():
-    env = fresh_env(RewardConfig(w_burial=1.0, burial_cap=5))
-    env.grid[:] = -1
-    env.grid[0, 0, 0, 0] = 20
-    assert env.reward_calc.burial_penalty(0, 0, 0) == -6.0, "Capped at 5 -> -(5 + 1)"
-    env.grid[0, 0, 0, 0] = 3
-    assert env.reward_calc.burial_penalty(0, 0, 0) == -4.0, "Below the cap is unchanged"
-    print("Burial cap limits penalty ✓")
-
-
-def test_center_bonus_inner_ring_only():
-    env = fresh_env(RewardConfig(w_center=0.3))
-    assert env.reward_calc.center_bonus(1, 2) == 0.3, "Inner 2x2 gets the full bonus"
-    assert env.reward_calc.center_bonus(0, 0) == 0.0, "Corner gets nothing"
-    assert env.reward_calc.center_bonus(3, 1) == 0.0, "Edge gets nothing"
-    print("Centre bonus on inner ring only ✓")
-
-
-def test_shape_terms_off_by_default():
-    env = fresh_env()
-    env.grid[:] = -1
-    env.grid[0, 0, 0, :] = 0
-    assert env.reward_calc.cliff_penalty(0, 0, 0, outbound=False) == 0.0
-    assert env.reward_calc.profile_penalty(0, 0, 0) == 0.0
-    print("Shape terms off with default weights ✓")
-
-
-if __name__ == "__main__":
-    test_profile_caps_pyramid()
-    test_cliff_penalty_tower_and_pit()
-    test_cliff_ignores_other_blocks()
-    test_profile_penalty_above_cap()
-    test_cliff_same_cost_corner_edge_centre()
-    test_burial_cap_limits_penalty()
-    test_center_bonus_inner_ring_only()
-    test_shape_terms_off_by_default()
-    test_action_bonus_is_constant()
-    test_burial_penalty_empty_stack_is_zero()
-    test_burial_penalty_scales_with_oldest()
-    test_height_penalty_scales_with_height()
-    test_dwell_reward_proportional_to_dwell()
-    test_travel_reward_short_distance_compensated()
-    test_travel_reward_long_distance_penalised()
-    test_reshuffle_penalty_scales_with_count()
-    test_reshuffle_penalty_scales_with_scope()
-    test_tick_penalty_zero_when_empty_yard()
-    test_tick_penalty_scales_with_dwell()
-    test_step_returns_breakdown_in_info()
-    test_episode_bonus_applied_at_termination()
-    print("\nAll reward tests passed ✓")
+def test_old_snapshot_with_removed_fields_loads():
+    parser = configparser.ConfigParser()
+    parser["reward"] = {"w_burial": "2.0", "w_height": "0.0", "threshold_divisor": "100",
+                        "w_action_bonus": "0.0", "w_max_idle": "0.0"}
+    cfg = load_dataclass(RewardConfig, parser, "reward")
+    assert cfg.w_burial == 2.0

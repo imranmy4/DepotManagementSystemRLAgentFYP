@@ -11,3 +11,4 @@ models/*
 notes/run_log.md
 deploy/.env
 deploy/model/
+REWARD_FIX.md

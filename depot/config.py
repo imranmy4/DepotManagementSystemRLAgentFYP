@@ -20,7 +20,7 @@ from typing import get_type_hints
 
 from depot import paths
 from depot.env import DepotConfig
-from depot.reward import RewardConfig
+from depot.reward import LEGACY_REWARD_FIELDS, RewardConfig
 
 
 def _str2bool(v):
@@ -46,12 +46,16 @@ def load_dataclass(dc_type, parser, section):
     """Build a dc_type instance from [section]; absent keys fall back to defaults.
 
     Raises if the section contains a key that isn't a field of the dataclass —
-    that's almost always a typo and silently ignoring it would be worse.
+    that's almost always a typo and silently ignoring it would be worse. Fields of earlier
+    reward versions (LEGACY_REWARD_FIELDS) are skipped so old run snapshots still load.
     """
     hints = get_type_hints(dc_type)
+    legacy = LEGACY_REWARD_FIELDS if dc_type is RewardConfig else frozenset()
     kwargs = {}
     if parser.has_section(section):
         for key, val in parser.items(section):
+            if key in legacy:
+                continue
             if key not in hints:
                 raise KeyError(f"[{section}] has unknown key '{key}' (not a {dc_type.__name__} field)")
             kwargs[key] = _cast(val, hints[key])
@@ -111,6 +115,8 @@ class TrainConfig:
     # measured on a 6P+4E / 16-thread laptop, 4 threads beat the default (8) by ~30%
     # and 16 was ~5x slower. 0 = leave PyTorch's default.
     torch_threads: int = 4
+    # Seed for the model and the training/eval envs (reproducible runs).
+    seed: int = 0
 
 
 def resolve_config(args=None, ini_path=None):

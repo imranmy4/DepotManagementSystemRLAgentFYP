@@ -103,6 +103,7 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
         torch.set_num_threads(train_cfg.torch_threads)
 
     vec_env = make_vec_env(depot, reward, train_cfg.n_envs)
+    vec_env.seed(train_cfg.seed)
     ppo_kwargs = {k: getattr(train_cfg, k) for k in PPO_KEYS}
     # net_arch comes from config as e.g. "256,256"; same hidden sizes for actor & critic.
     layers = [int(x) for x in str(train_cfg.net_arch).split(",") if x.strip()]
@@ -127,7 +128,8 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
         model = MaskablePPO(
             MaskableActorCriticPolicy, vec_env, policy_kwargs=policy_kwargs,
             target_kl=(train_cfg.target_kl or None),   # 0 -> None (disabled)
-            verbose=1, device=train_cfg.device, tensorboard_log=tb_log, **ppo_kwargs,
+            verbose=1, device=train_cfg.device, tensorboard_log=tb_log, seed=train_cfg.seed,
+            **ppo_kwargs,
         )
 
     # Checkpoints + their VecNormalize stats, so any checkpoint (and an aborted run) is
@@ -146,6 +148,7 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
     # reward is raw. callback_on_new_best snapshots the matching normalizer alongside
     # best_model so it is always evaluable.
     eval_env = make_vec_env(depot, reward, 1)
+    eval_env.seed(train_cfg.seed + 10_000)      # different episodes from training
     eval_env.training = False
     eval_env.norm_reward = False
     save_best_vn = _SaveVecNormalize(vec_env, os.path.join(run_dir, "best_vec_normalize.pkl"))
