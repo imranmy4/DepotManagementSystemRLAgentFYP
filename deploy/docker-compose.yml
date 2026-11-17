@@ -15,5 +15,17 @@ services:
       interval: 5s
       retries: 10
 
+  redis:
+    image: redis:7
+    container_name: depot-redis
+    ports:
+      - "6379:6379"
+    # No persistence: Redis holds order ids only; the worker rebuilds the queue from Postgres.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
 volumes:
   pgdata:

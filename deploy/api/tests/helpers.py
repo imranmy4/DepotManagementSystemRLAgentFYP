@@ -1,10 +1,12 @@
 """Test-only helpers: a small yard, container number generation and simulated time."""
 import random
 
+import numpy as np
 from sqlalchemy import text
 
 from app.iso6346 import check_digit
 from depot.env import DepotConfig
+from depot.reward import RewardConfig
 
 # Small yard: 2 blocks side by side, 2 bays x 2 rows x 3 tiers each.
 TINY = DepotConfig(n_blocks=2, block_rows=1, n_bays=2, n_rows=2, n_tiers=3)
@@ -29,3 +31,15 @@ def pass_days(session, days: float) -> None:
         sets = ", ".join(f"{c} = {c} - make_interval(secs => :s)" for c in cols)
         session.execute(text(f"UPDATE {table} SET {sets}"), {"s": days * 86400})
     session.expire_all()
+
+
+class StubPolicy:
+    """Picks a fixed action, or the first valid one; same interface as depot.inference.Policy."""
+    depot_config = TINY
+    reward_config = RewardConfig()
+
+    def __init__(self, action=None):
+        self.action = action
+
+    def act(self, env):
+        return self.action if self.action is not None else int(np.flatnonzero(env.action_masks())[0])

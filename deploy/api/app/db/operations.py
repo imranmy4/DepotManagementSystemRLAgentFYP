@@ -7,7 +7,7 @@ Order flow:
     plan_moves (crane instructions from the policy) -> move_log rows, status planned
     confirm_move (operator confirms each move, in order) -> locations updated; the last
                                                            move completes the order
-    reject_order (before any move is confirmed)    -> rejected
+    reject_order (before any move is confirmed, with a reason) -> rejected
 
 Every function works inside the caller's transaction and flushes but never commits.
 Timestamps come from the database clock (transaction start time).
@@ -74,6 +74,23 @@ def current_yard(session: Session) -> list[YardContainer]:
     ).scalar_subquery()
     rows = session.execute(_pos_select().add_columns(arrived))
     return [YardContainer(c, (b, ba, r, t), at) for c, b, ba, r, t, at in rows]
+
+
+def container_count(session: Session) -> int:
+    """Number of containers currently in the yard."""
+    return session.scalar(select(func.count()).select_from(ContainerLocation)
+                          .where(ContainerLocation.removed_at.is_(None)))
+
+
+def order_in_progress(session: Session) -> Order | None:
+    """The order the crane is working on, if any."""
+    return session.scalar(select(Order).where(Order.status == OrderStatus.IN_PROGRESS))
+
+
+def queued_orders(session: Session) -> list[Order]:
+    """Orders waiting for the worker, oldest first."""
+    return list(session.scalars(select(Order).where(Order.status == OrderStatus.QUEUED)
+                                .order_by(Order.order_id)))
 
 
 def crane_position(session: Session) -> tuple[int, int, int]:
@@ -264,7 +281,7 @@ def confirm_move(session: Session, move_id: int) -> MoveLog:
     return move
 
 
-def reject_order(session: Session, order_id: int) -> Order:
+def reject_order(session: Session, order_id: int, reason: str) -> Order:
     """Reject an order that has no confirmed moves; its planned moves are deleted."""
     order = _lock_order(session, order_id)
     if order.status not in (OrderStatus.QUEUED, OrderStatus.IN_PROGRESS):
@@ -275,6 +292,7 @@ def reject_order(session: Session, order_id: int) -> Order:
     for m in moves:
         session.delete(m)
     order.status = OrderStatus.REJECTED
+    order.reject_reason = reason[:200]
     if order.type == OrderType.OUTBOUND:
         order.container_no = None
     session.flush()

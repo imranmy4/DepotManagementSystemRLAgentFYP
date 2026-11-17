@@ -117,8 +117,9 @@ def test_outbound_must_end_with_retrieve(yard):
 
 def test_reject_before_confirm(yard):
     order, _ = _outbound_with_dig(yard)
-    reject_order(yard, order.order_id)
+    reject_order(yard, order.order_id, "truck left")
     assert order.status == OrderStatus.REJECTED and order.container_no is None
+    assert order.reject_reason == "truck left"
     assert order_moves(yard, order.order_id) == []
     assert len(occupancy(yard)) == 2
 
@@ -127,7 +128,7 @@ def test_reject_after_confirm_refused(yard):
     order, (reloc, _) = _outbound_with_dig(yard)
     confirm_move(yard, reloc.move_id)
     with pytest.raises(OperationError, match="confirmed moves"):
-        reject_order(yard, order.order_id)
+        reject_order(yard, order.order_id, "truck left")
 
 
 def test_db_refuses_double_booked_slot(yard):

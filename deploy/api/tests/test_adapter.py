@@ -8,7 +8,6 @@ import pytest
 
 from depot import paths
 from depot.config import load_run_config
-from depot.reward import RewardConfig
 
 from app.adapter import NoValidAction, build_env, decide, dwell_ticks, load_policy
 from app.db.models import MoveType, OrderType
@@ -17,22 +16,10 @@ from app.db.operations import (
     start_order,
 )
 from app.db.seed import seed_layout
-from helpers import TINY, container_no, pass_days
+from helpers import StubPolicy, container_no, pass_days
 
 T0 = datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc)
 DAY = 86400
-
-
-class StubPolicy:
-    """Picks a fixed action, or the first valid one; same interface as depot.inference.Policy."""
-    depot_config = TINY
-    reward_config = RewardConfig()
-
-    def __init__(self, action=None):
-        self.action = action
-
-    def act(self, env):
-        return self.action if self.action is not None else int(np.flatnonzero(env.action_masks())[0])
 
 
 def run_order(session, policy, order):

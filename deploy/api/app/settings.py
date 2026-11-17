@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     postgres_db: str
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+    redis_url: str = "redis://localhost:6379/0"
 
     # Real seconds per model tick, the unit of dwell time the model was trained on (1 day).
     tick_seconds: int = 86400
