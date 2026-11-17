@@ -52,9 +52,18 @@ def test_inbound_step_on_empty_stack_has_no_burial():
     assert info["reward_breakdown"]["burial"] == 0.0
 
 
-def test_dwell_reward_proportional_to_dwell():
+def test_dwell_reward_is_log_of_age():
     env = fresh_env(RewardConfig(w_dwell=2.0))
-    assert env.reward_calc.dwell_reward(5) == 10.0
+    assert env.reward_calc.dwell_reward(0) == 0.0
+    assert np.isclose(env.reward_calc.dwell_reward(5), 2.0 * np.log(6))
+
+
+def test_default_weights_follow_operator_ranking():
+    """Full travel range < one reshuffle; full age range (0-365 days) < full travel range."""
+    env = fresh_env()
+    c, max_dist = env.reward_calc.config, 3 + 3 + 3       # 2x3 block grid, 4x4 bays/rows
+    assert c.w_travel * max_dist < c.w_reshuffle * c.reshuffle_mult_same
+    assert env.reward_calc.dwell_reward(365) < c.w_travel * max_dist
 
 
 def test_travel_penalty_linear():
@@ -81,12 +90,12 @@ def test_tick_penalty_zero_when_empty_yard():
     assert env.reward_calc.tick_penalty() == 0.0
 
 
-def test_tick_penalty_scales_with_mean_dwell():
+def test_tick_penalty_is_mean_log_age():
     env = fresh_env(RewardConfig(w_mean_idle=1.0))
     env.grid[:] = -1
     env.grid[0, 0, 0, 0] = 4
     env.grid[1, 1, 1, 0] = 8
-    assert env.reward_calc.tick_penalty() == -6.0
+    assert np.isclose(env.reward_calc.tick_penalty(), -(np.log(5) + np.log(9)) / 2)
 
 
 def test_every_skipped_tick_is_penalised():
@@ -97,7 +106,7 @@ def test_every_skipped_tick_is_penalised():
     env._tick_penalty = 0.0
     env._end_tick()
     env._end_tick()
-    assert env._tick_penalty == -(11.0 + 12.0)
+    assert np.isclose(env._tick_penalty, -(np.log(12) + np.log(13)))
     assert env.grid[0, 0, 0, 0] == 12
 
 

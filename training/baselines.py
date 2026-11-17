@@ -59,11 +59,6 @@ def nearest_action(env, rng):
 
 
 # ─── Planner: a reasonable human yard-planner's rule of thumb ────────────────
-# Exchange rates in "ticks of dwell", matching the reward's own pricing
-# (w_reshuffle·mult_same / w_dwell = 3 / 0.5 = 6 ticks per reshuffle,
-#  w_travel / w_dwell = 0.3 / 0.5 ≈ 0.5 tick per unit of crane travel).
-PLANNER_RESHUFFLE_TICKS = 6.0
-PLANNER_TRAVEL_TICKS = 0.5
 PLANNER_PROFILE_STEP = 1      # pyramid: height cap drops one tier per ring towards the block edge
 
 
@@ -87,9 +82,9 @@ def profile_caps(Ba: int, R: int, H: int, step: int) -> np.ndarray:
 def planner_action(env, rng):
     """Strong heuristic baseline — what a sensible yard planner would do.
 
-    Outbound: retrieve the container with the best  dwell − 6·reshuffles − 0.5·travel,
-      i.e. prefer old containers, but only dig for one when it is old enough to be worth
-      the reshuffles, and prefer nearby ones when otherwise equal.
+    Outbound: retrieve the container with the best immediate reward at the reward's own prices,
+      age bonus + travel penalty − reshuffles (each priced as a same-block move), i.e. prefer old
+      containers, dig only when the age gain outweighs the reshuffles, and prefer nearby ones.
     Inbound: obey the same safety rules the agent is rewarded for — never create a cliff
       (> cliff_tol tiers above a neighbour) or exceed the pyramid cap. Among safe stacks,
       keep fresh containers together (youngest oldest-container first), then the lowest
@@ -100,13 +95,14 @@ def planner_action(env, rng):
     heights = (env.grid >= 0).sum(axis=3)                         # (B, Ba, R)
 
     if env.mode == 1:
+        rc = env.reward_calc
+        resh_cost = rc.config.w_reshuffle * rc.config.reshuffle_mult_same
         scores = []
         for _, bl, ba, r, h in decoded:
             n_resh = int(heights[bl, ba, r]) - 1 - h
             dist = env.crane_dist(env.crane_pos, (bl, ba, r))
-            scores.append(int(env.grid[bl, ba, r, h])
-                          - PLANNER_RESHUFFLE_TICKS * n_resh
-                          - PLANNER_TRAVEL_TICKS * dist)
+            scores.append(rc.dwell_reward(int(env.grid[bl, ba, r, h]))
+                          + rc.travel_penalty(dist) - resh_cost * n_resh)
         return _pick_best(valid, scores, rng, maximize=True)
 
     tol = env.reward_calc.config.cliff_tol

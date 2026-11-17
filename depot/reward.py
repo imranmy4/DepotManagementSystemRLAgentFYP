@@ -1,6 +1,14 @@
 """Reward terms of the depot env: burial and cliff on inbound; dwell, travel, reshuffle and cliff
-on outbound; mean idle per tick."""
+on outbound; mean idle per tick.
+
+Weights follow the operators' ranking reshuffle > crane travel > dwell time: the full range of
+each less important term fits under one unit of the next (travel 0.3 x max distance 9 = 2.7 < one
+reshuffle 3; age 0.3 x log(1 + 365) = 1.8 < 2.7). Age enters as log(1 + days), so its effect does
+not depend on how old a yard is.
+"""
 from dataclasses import dataclass
+
+import numpy as np
 
 
 @dataclass
@@ -12,7 +20,7 @@ class RewardConfig:
     burial_cap:          float = 5.0
 
     # Outbound
-    w_dwell:             float = 0.5
+    w_dwell:             float = 0.3    # per unit of log(1 + age) of the retrieved container
     w_travel:            float = 0.3    # per unit of crane distance
     w_reshuffle:         float = 3.0
     # Reshuffle scope multipliers (cost grows the farther a container is moved).
@@ -26,7 +34,7 @@ class RewardConfig:
     w_cliff:             float = 15.0
     cliff_tol:           int   = 1
 
-    # Per tick: mean dwell of the containers in the yard.
+    # Per tick: mean log(1 + age) of the containers in the yard.
     w_mean_idle:         float = 0.2
 
 
@@ -77,8 +85,8 @@ class RewardCalculator:
     # ─── Outbound ────────────────────────────────────────────────────
 
     def dwell_reward(self, dwell: float) -> float:
-        """Reward proportional to the retrieved container's dwell (read before removal)."""
-        return self.config.w_dwell * max(0.0, float(dwell))
+        """Reward for releasing an old container: w·log(1 + dwell), read before removal."""
+        return self.config.w_dwell * float(np.log1p(max(0.0, float(dwell))))
 
     def travel_penalty(self, dist: float) -> float:
         return -self.config.w_travel * dist
@@ -92,11 +100,11 @@ class RewardCalculator:
     # ─── Per tick ────────────────────────────────────────────────────
 
     def tick_penalty(self) -> float:
-        """Mean-dwell idle penalty for one tick."""
+        """Idle penalty for one tick: mean log(1 + dwell) of the containers in the yard."""
         occupied = self.env.grid[self.env.grid >= 0]
         if len(occupied) == 0:
             return 0.0
-        return -self.config.w_mean_idle * float(occupied.mean())
+        return -self.config.w_mean_idle * float(np.log1p(occupied).mean())
 
     # ─── Per step ────────────────────────────────────────────────────
 
