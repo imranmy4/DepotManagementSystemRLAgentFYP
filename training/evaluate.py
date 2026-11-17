@@ -40,6 +40,7 @@ N_EPISODES = 50
 METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
                "reshuffles", "digs", "yard_dwell", "occ_ratio",
                "same_block", "adj_block", "far_block",
+               "block_runs", "age_rank", "dwell_out",
                "full_stacks", "empty_stacks", "cliffs", "height_std"]
 
 
@@ -48,15 +49,24 @@ def _outbound_metrics(env, action):
 
     reshuffles = number of containers above the target that must be relocated.
     delta_bl   = block distance between crane and target (0=same, 1=adj, >=2=far).
+    dwell      = age of the retrieved container.
+    age_rank   = its place in the yard's age order: 1 = oldest in the yard, 0 = youngest
+                 (ties count half).
     """
     kind = env.decode_action(action)
     if kind[0] != "outbound":
         return None
     _, bl, ba, r, h = kind
     height = int((env.grid[bl, ba, r, :] >= 0).sum())
+    dwell = int(env.grid[bl, ba, r, h])
+    others = env.grid[env.grid >= 0]
+    n_other = others.size - 1
+    rank = ((others < dwell).sum() + 0.5 * ((others == dwell).sum() - 1)) / n_other \
+        if n_other > 0 else 1.0
     return {"dist": env.crane_dist(env.crane_pos, (bl, ba, r)),
             "reshuffles": height - 1 - h,
-            "delta_bl": int(env.block_dist(bl, int(env.crane_pos[0])))}
+            "delta_bl": int(env.block_dist(bl, int(env.crane_pos[0]))),
+            "block": bl, "dwell": dwell, "age_rank": float(rank)}
 
 
 def _yard_mean_dwell(env):
@@ -83,6 +93,7 @@ def run_episode(env, choose_action, seed):
     reward = crane_travel = reshuffles = 0.0
     n_in = n_out = n_dig = 0
     n_same = n_adj = n_far = 0
+    n_runs, last_block, age_rank, dwell_out = 0, None, 0.0, 0.0
     dwell_samples, occ_samples = [], []
     layout_samples = []
     done = False
@@ -97,6 +108,11 @@ def run_episode(env, choose_action, seed):
             reshuffles += m["reshuffles"]
             if m["reshuffles"] > 0:
                 n_dig += 1
+            age_rank += m["age_rank"]
+            dwell_out += m["dwell"]
+            if m["block"] != last_block:       # a new run of retrievals from one block
+                n_runs += 1
+                last_block = m["block"]
             dbl = m["delta_bl"]
             if dbl == 0:
                 n_same += 1
@@ -122,6 +138,9 @@ def run_episode(env, choose_action, seed):
         "same_block": n_same,
         "adj_block": n_adj,
         "far_block": n_far,
+        "block_runs": n_runs,
+        "age_rank": age_rank,
+        "dwell_out": dwell_out,
         **{k: float(np.mean([s[k] for s in layout_samples])) if layout_samples else 0.0
            for k in ("full_stacks", "empty_stacks", "cliffs", "height_std")},
     }
@@ -155,6 +174,10 @@ def performance(res):
         "same%":      100.0 * res["same_block"].sum() / tot_out_safe,
         "adj%":       100.0 * res["adj_block"].sum() / tot_out_safe,
         "far%":       100.0 * res["far_block"].sum() / tot_out_safe,
+        # Trade-off between batching in a block and chasing old containers (RO3).
+        "batch_len":  tot_out / max(1.0, res["block_runs"].sum()),
+        "age_rank%":  100.0 * res["age_rank"].sum() / tot_out_safe,
+        "dwell_out":  res["dwell_out"].sum() / tot_out_safe,
         "full%":      float(res["full_stacks"].mean()),
         "empty%":     float(res["empty_stacks"].mean()),
         "cliff%":     float(res["cliffs"].mean()),
@@ -195,6 +218,12 @@ SUMMARY_COLS = [
     ("full%",      "Full stacks %", "stacks at max height",                     False, "{:.1f}"),
 ]
 BASELINES = ["Random", "FIFO", "Nearest", "Planner"]
+# Trade-off view (key, label, higher_is_better=None: context, not a goal by itself, fmt).
+TRADEOFF_COLS = [("batch_len", "batch length", None, "{:.2f}"),
+                 ("age_rank%", "age rank %", None, "{:.1f}"),
+                 ("dwell_out", "dwell at out", None, "{:.1f}"),
+                 ("same%", "same block %", None, "{:.1f}"),
+                 ("far%", "far %", None, "{:.1f}")]
 
 
 def _print_table(title, rows, cols, label_w=10, col_w=14):
@@ -329,6 +358,9 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
             continue
         arrow = "higher" if hib else "lower"
         _print_matrix(f"{lab} — {unit} ({arrow} is better)", scen_perf, key, fmt, hib)
+    print("\nTRADE-OFF — batching vs age priority (context, no 'better' direction; * = highest)")
+    for key, lab, _, fmt in TRADEOFF_COLS[:3]:
+        _print_matrix(f"{lab}", scen_perf, key, fmt, True)
 
     if "Agent" in agent_policies:
         print("\nAGENT vs PLANNER — metrics where the agent is better, per scenario")
@@ -410,6 +442,8 @@ def main():
     _print_table("Retrieval block jumps (% of retrievals: crane stays / 1 block / 2+ blocks)", perf,
                  [("same%", "same block", None, "{:.1f}"), ("adj%", "adjacent", None, "{:.1f}"),
                   ("far%", "far", None, "{:.1f}")])
+    _print_table("Batching vs age priority (batch = consecutive retrievals from one block; "
+                 "age rank 100 = oldest in yard)", perf, TRADEOFF_COLS)
     _print_table("Yard shape (time-averaged)", perf,
                  [("full%", "full %", False, "{:.1f}"), ("empty%", "empty %", False, "{:.1f}"),
                   ("cliff%", "cliffs %", False, "{:.1f}"), ("h_std", "height std", False, "{:.2f}")])
