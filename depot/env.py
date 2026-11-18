@@ -31,6 +31,14 @@ class DepotConfig:
     # Each episode shifts max_in and max_out independently by U{-j..j} (min 1), so the
     # agent sees inbound-heavy and outbound-heavy periods.
     demand_jitter: int = 0
+    # Warmstart ages in non-"aged" episodes: long-tailed (exponential with this mean, capped at
+    # warmstart_age_max) and sorted per stack oldest at the bottom, as stacks build up over time.
+    # 0 = all ages 0.
+    warmstart_age_mean: float = 0.0
+    warmstart_age_max: int = 90
+    # warmstart_age_mean_max > warmstart_age_mean -> each episode's age mean is drawn uniformly
+    # in that range (young to old yards).
+    warmstart_age_mean_max: float = 0.0
 
 
 class DepotEnv(gym.Env):
@@ -86,6 +94,7 @@ class DepotEnv(gym.Env):
 
         self.reward_calc = RewardCalculator(reward_config or RewardConfig(), self)
         self.reshuffler  = MinMaxReshuffler(self)
+        self._tick_penalty = 0.0   # idle penalty of the ticks ended during the current step
         self._last_breakdown = {}  # for logging
 
     def _get_obs(self) -> np.ndarray:
@@ -206,7 +215,8 @@ class DepotEnv(gym.Env):
             self._draw_new_tick_demand()
             if self._resolve_mode():
                 break
-            self.tick += 1
+            self._end_tick()
+        self._tick_penalty = 0.0      # ticks skipped before the first step carry no reward
 
         return self._get_obs(), {}
 
@@ -224,14 +234,18 @@ class DepotEnv(gym.Env):
             self.ep_warmstart = float(rng.uniform(c.warmstart, c.warmstart_max))
         p = float(c.warmstart_aged)
         self.ep_warmstart_aged = p >= 1.0 or (p > 0.0 and bool(rng.random() < p))
+        self.ep_age_mean = float(c.warmstart_age_mean)
+        if c.warmstart_age_mean_max > c.warmstart_age_mean:
+            self.ep_age_mean = float(rng.uniform(c.warmstart_age_mean, c.warmstart_age_mean_max))
 
     def _warmstart_yard(self):
         """Pre-fill the yard flat to this episode's warmstart fraction (0.0–1.0).
 
         "Flat" = containers spread as evenly as possible across stacks (heights differ by
         at most 1, the remainder placed on a random subset of stacks), filling bottom-up.
-        Ages are all 0, or random in [0, n_ticks) per slot when this episode is "aged"
-        (see _draw_episode_conditions). Uses self.np_random, so a given reset seed
+        Ages: random in [0, n_ticks) per slot when this episode is "aged" (see
+        _draw_episode_conditions); otherwise long-tailed and sorted oldest-at-the-bottom when
+        warmstart_age_mean > 0, else all 0. Uses self.np_random, so a given reset seed
         reproduces the same warmstart for every policy (paired-fair in evaluation).
         """
         frac = min(1.0, max(0.0, self.ep_warmstart))
@@ -249,15 +263,22 @@ class DepotEnv(gym.Env):
 
         tier = np.arange(self.H).reshape(1, 1, 1, self.H)
         occupied = tier < heights[..., None]                       # (B, Ba, R, H)
+        c = self.config
         if self.ep_warmstart_aged:
-            ages = self.np_random.integers(0, max(1, self.config.n_ticks), size=self.grid.shape)
+            ages = self.np_random.integers(0, max(1, c.n_ticks), size=self.grid.shape)
+        elif c.warmstart_age_mean > 0:
+            ages = np.minimum(self.np_random.exponential(self.ep_age_mean, size=self.grid.shape),
+                              c.warmstart_age_max).astype(np.int32)
         else:
-            ages = np.zeros(self.grid.shape, dtype=np.int32)  # all dwell 0: cleaner initial state
-        self.grid = np.where(occupied, ages, -1).astype(np.int32)
+            ages = np.zeros(self.grid.shape, dtype=np.int32)
+        grid = np.where(occupied, ages, -1).astype(np.int32)
+        if not self.ep_warmstart_aged and c.warmstart_age_mean > 0:
+            grid = -np.sort(-grid, axis=3)      # descending per stack: oldest at the bottom
+        self.grid = grid
 
     def step(self, action: int):
         decoded = self.decode_action(action)
-        tick_at_step_start = self.tick
+        self._tick_penalty = 0.0
 
         if decoded[0] == "inbound":
             _, bl, ba, r = decoded
@@ -269,25 +290,17 @@ class DepotEnv(gym.Env):
             retrieved_dwell = int(self.grid[bl, ba, r, h])
             dist, reshuffle_dists, _ = self._apply_outbound(bl, ba, r, h)
             reward, breakdown = self.reward_calc.compute_outbound_step(
-                retrieved_dwell, dist, reshuffle_dists, (bl, ba, r)
-            )
+                retrieved_dwell, dist, reshuffle_dists)
 
         self._update_mode_or_advance()
 
-        # Per-tick penalty: applied if a tick advanced during this step
-        if self.tick > tick_at_step_start:
-            tick_pen = self.reward_calc.tick_penalty()
-            reward += tick_pen
-            breakdown["tick_penalty"] = tick_pen
+        # Idle penalty of every tick that ended during this step
+        if self._tick_penalty:
+            reward += self._tick_penalty
+            breakdown["tick_penalty"] = self._tick_penalty
 
         terminated = self.tick >= self.config.n_ticks
         truncated = False
-
-        # Episode bonus at termination
-        if terminated:
-            ep_bonus = self.reward_calc.episode_bonus()
-            reward += ep_bonus
-            breakdown["episode_bonus"] = ep_bonus
 
         self._last_breakdown = breakdown
         info = {"reward_breakdown": breakdown}
@@ -443,18 +456,21 @@ class DepotEnv(gym.Env):
         finally:
             self.grid = saved
 
-    def _advance_tick(self):
-        """End-of-tick: age containers, increment tick, draw the next actionable demand."""
+    def _end_tick(self):
+        """Age containers by one tick, advance the tick and add its idle penalty."""
         self.grid[self.grid >= 0] += 1
         self.tick += 1
+        self._tick_penalty += self.reward_calc.tick_penalty()
 
-        # Skip ticks with nothing actionable (empty draws, or demand the yard can't serve)
+    def _advance_tick(self):
+        """End the current tick, then skip ticks with nothing actionable (empty draws, or
+        demand the yard can't serve) until one has demand or the episode ends."""
+        self._end_tick()
         while self.tick < self.config.n_ticks:
             self._draw_new_tick_demand()
             if self._resolve_mode():
                 return
-            self.grid[self.grid >= 0] += 1
-            self.tick += 1
+            self._end_tick()
 
     def _update_mode_or_advance(self):
         """

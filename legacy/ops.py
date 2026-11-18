@@ -118,7 +118,7 @@ class LiveOrderRun:
             self.env.crane_pos = np.array([bl, ba, r], dtype=np.int32)
             self.total_travel += dist
             reward, _ = self.env.reward_calc.compute_outbound_step(
-                step["dwell"], dist, step["reshuffle_dists"], (bl, ba, r))
+                step["dwell"], dist, step["reshuffle_dists"])
             self.total_reward += reward
         self.history.append(step)
 

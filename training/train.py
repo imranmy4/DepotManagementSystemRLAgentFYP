@@ -26,7 +26,24 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from depot import config as configloader, paths, runs
 from depot.config import TrainConfig, resolve_config
 from depot.env import DepotEnv, DepotConfig
+from depot.policy import SlotPolicy
 from depot.reward import RewardConfig
+
+
+class _FixedEpisodesEval(MaskableEvalCallback):
+    """Evaluates every checkpoint on the same episodes: reseeds the eval env before each run.
+
+    The env draws the same randomness per episode whatever the policy does, so each evaluation
+    replays identical yards and demand, making scores (and the best_model choice) comparable.
+    """
+    def __init__(self, *args, eval_seed, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eval_seed = eval_seed
+
+    def _on_step(self) -> bool:
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            self.eval_env.seed(self.eval_seed)
+        return super()._on_step()
 
 
 class _SaveVecNormalize(BaseCallback):
@@ -45,6 +62,9 @@ class _SaveVecNormalize(BaseCallback):
         self.vec_env.save(self.save_path)
         return True
 
+
+# Parallel eval envs (evaluation speed only; episodes are fixed by the eval seed).
+EVAL_ENVS = 10
 
 # Direct MaskablePPO constructor kwargs (net_arch is handled separately via policy_kwargs).
 PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
@@ -66,10 +86,25 @@ def make_env(depot_config, reward_config):
     return _init
 
 
-def make_vec_env(depot_config, reward_config, n_envs):
-    """Vectorised, observation/reward-normalised env stack for training."""
+def make_vec_env(depot_config, reward_config, n_envs, norm_obs=True):
+    """Vectorised, reward-normalised (and optionally observation-normalised) env stack."""
     venv = DummyVecEnv([make_env(depot_config, reward_config) for _ in range(n_envs)])
-    return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    return VecNormalize(venv, norm_obs=norm_obs, norm_reward=True, clip_obs=10.0)
+
+
+def policy_setup(depot, reward, train_cfg):
+    """(policy class, policy_kwargs, normalise observations?) for the configured network."""
+    if train_cfg.policy == "slot":
+        env = DepotEnv(depot)
+        max_dist = env.crane_dist((0, 0, 0), (depot.n_blocks - 1, depot.n_bays - 1, depot.n_rows - 1))
+        kwargs = dict(yard=(depot.n_blocks, depot.n_bays, depot.n_rows, depot.n_tiers),
+                      max_dist=max(1, max_dist), slot_hidden=train_cfg.slot_hidden,
+                      max_age=reward.max_age if reward.w_overdue > 0 else None)
+        return SlotPolicy, kwargs, False
+    if train_cfg.policy == "mlp":
+        layers = [int(x) for x in str(train_cfg.net_arch).split(",") if x.strip()]
+        return MaskableActorCriticPolicy, dict(net_arch=dict(pi=layers, vf=layers)), True
+    raise ValueError(f"unknown policy '{train_cfg.policy}' (slot | mlp)")
 
 
 def _resume_run_dir(resume):
@@ -102,11 +137,10 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
     if train_cfg.torch_threads > 0:
         torch.set_num_threads(train_cfg.torch_threads)
 
-    vec_env = make_vec_env(depot, reward, train_cfg.n_envs)
+    policy_class, policy_kwargs, norm_obs = policy_setup(depot, reward, train_cfg)
+    vec_env = make_vec_env(depot, reward, train_cfg.n_envs, norm_obs=norm_obs)
+    vec_env.seed(train_cfg.seed)
     ppo_kwargs = {k: getattr(train_cfg, k) for k in PPO_KEYS}
-    # net_arch comes from config as e.g. "256,256"; same hidden sizes for actor & critic.
-    layers = [int(x) for x in str(train_cfg.net_arch).split(",") if x.strip()]
-    policy_kwargs = dict(net_arch=dict(pi=layers, vf=layers))
 
     if resume:
         ckpt, ckpt_vn, done = runs.latest_checkpoint(run_dir)
@@ -125,9 +159,10 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
     else:
         steps = target_total
         model = MaskablePPO(
-            MaskableActorCriticPolicy, vec_env, policy_kwargs=policy_kwargs,
+            policy_class, vec_env, policy_kwargs=policy_kwargs,
             target_kl=(train_cfg.target_kl or None),   # 0 -> None (disabled)
-            verbose=1, device=train_cfg.device, tensorboard_log=tb_log, **ppo_kwargs,
+            verbose=1, device=train_cfg.device, tensorboard_log=tb_log, seed=train_cfg.seed,
+            **ppo_kwargs,
         )
 
     # Checkpoints + their VecNormalize stats, so any checkpoint (and an aborted run) is
@@ -145,16 +180,17 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
     # from the training env before each eval; norm_reward is off there so the reported eval
     # reward is raw. callback_on_new_best snapshots the matching normalizer alongside
     # best_model so it is always evaluable.
-    eval_env = make_vec_env(depot, reward, 1)
+    eval_env = make_vec_env(depot, reward, EVAL_ENVS, norm_obs=norm_obs)
     eval_env.training = False
     eval_env.norm_reward = False
     save_best_vn = _SaveVecNormalize(vec_env, os.path.join(run_dir, "best_vec_normalize.pkl"))
-    eval_cb = MaskableEvalCallback(
+    eval_cb = _FixedEpisodesEval(
         eval_env,
+        eval_seed=train_cfg.seed + 10_000,       # different episodes from training and benchmark
         best_model_save_path=run_dir,
         log_path=run_dir,
-        eval_freq=max(100_000 // train_cfg.n_envs, 1),
-        n_eval_episodes=20,
+        eval_freq=max(train_cfg.eval_freq // train_cfg.n_envs, 1),
+        n_eval_episodes=train_cfg.eval_episodes,
         deterministic=True,
         callback_on_new_best=save_best_vn,
     )

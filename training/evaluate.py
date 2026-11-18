@@ -17,9 +17,9 @@ Output:
      best on it, with the % difference and a ✓/✗.
   3. DETAILS — per-episode totals, retrieval block jumps, and yard shape.
 
-With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 30/50/70/85%,
-new vs mixed-age pre-fill, inbound/outbound-heavy demand), printing a summary table per
-scenario, overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
+With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 0% to 95% x a
+young and an old age profile, ages long-tailed and sorted oldest-at-the-bottom), printing a summary table per scenario,
+overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
     python training/evaluate.py --stress
 """
 import os
@@ -40,6 +40,7 @@ N_EPISODES = 50
 METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
                "reshuffles", "digs", "yard_dwell", "occ_ratio",
                "same_block", "adj_block", "far_block",
+               "block_runs", "age_rank", "dwell_out", "overdue",
                "full_stacks", "empty_stacks", "cliffs", "height_std"]
 
 
@@ -48,15 +49,24 @@ def _outbound_metrics(env, action):
 
     reshuffles = number of containers above the target that must be relocated.
     delta_bl   = block distance between crane and target (0=same, 1=adj, >=2=far).
+    dwell      = age of the retrieved container.
+    age_rank   = its place in the yard's age order: 1 = oldest in the yard, 0 = youngest
+                 (ties count half).
     """
     kind = env.decode_action(action)
     if kind[0] != "outbound":
         return None
     _, bl, ba, r, h = kind
     height = int((env.grid[bl, ba, r, :] >= 0).sum())
+    dwell = int(env.grid[bl, ba, r, h])
+    others = env.grid[env.grid >= 0]
+    n_other = others.size - 1
+    rank = ((others < dwell).sum() + 0.5 * ((others == dwell).sum() - 1)) / n_other \
+        if n_other > 0 else 1.0
     return {"dist": env.crane_dist(env.crane_pos, (bl, ba, r)),
             "reshuffles": height - 1 - h,
-            "delta_bl": int(env.block_dist(bl, int(env.crane_pos[0])))}
+            "delta_bl": int(env.block_dist(bl, int(env.crane_pos[0]))),
+            "block": bl, "dwell": dwell, "age_rank": float(rank)}
 
 
 def _yard_mean_dwell(env):
@@ -83,6 +93,9 @@ def run_episode(env, choose_action, seed):
     reward = crane_travel = reshuffles = 0.0
     n_in = n_out = n_dig = 0
     n_same = n_adj = n_far = 0
+    n_runs, last_block, age_rank, dwell_out = 0, None, 0.0, 0.0
+    overdue_samples = []
+    max_age = env.reward_calc.config.max_age
     dwell_samples, occ_samples = [], []
     layout_samples = []
     done = False
@@ -97,6 +110,11 @@ def run_episode(env, choose_action, seed):
             reshuffles += m["reshuffles"]
             if m["reshuffles"] > 0:
                 n_dig += 1
+            age_rank += m["age_rank"]
+            dwell_out += m["dwell"]
+            if m["block"] != last_block:       # a new run of retrievals from one block
+                n_runs += 1
+                last_block = m["block"]
             dbl = m["delta_bl"]
             if dbl == 0:
                 n_same += 1
@@ -107,6 +125,8 @@ def run_episode(env, choose_action, seed):
         else:                                  # an inbound placement
             n_in += 1
         dwell_samples.append(_yard_mean_dwell(env))
+        occ = env.grid[env.grid >= 0]
+        overdue_samples.append(100.0 * float((occ > max_age).mean()) if occ.size else 0.0)
         occ_samples.append((env.grid >= 0).sum() / env.grid.size)
         layout_samples.append(_layout_metrics(env))
         done = term or trunc
@@ -122,6 +142,10 @@ def run_episode(env, choose_action, seed):
         "same_block": n_same,
         "adj_block": n_adj,
         "far_block": n_far,
+        "block_runs": n_runs,
+        "age_rank": age_rank,
+        "dwell_out": dwell_out,
+        "overdue": float(np.mean(overdue_samples)) if overdue_samples else 0.0,
         **{k: float(np.mean([s[k] for s in layout_samples])) if layout_samples else 0.0
            for k in ("full_stacks", "empty_stacks", "cliffs", "height_std")},
     }
@@ -155,6 +179,11 @@ def performance(res):
         "same%":      100.0 * res["same_block"].sum() / tot_out_safe,
         "adj%":       100.0 * res["adj_block"].sum() / tot_out_safe,
         "far%":       100.0 * res["far_block"].sum() / tot_out_safe,
+        # Trade-off between batching in a block and chasing old containers (RO3).
+        "batch_len":  tot_out / max(1.0, res["block_runs"].sum()),
+        "age_rank%":  100.0 * res["age_rank"].sum() / tot_out_safe,
+        "dwell_out":  res["dwell_out"].sum() / tot_out_safe,
+        "overdue%":   float(res["overdue"].mean()),
         "full%":      float(res["full_stacks"].mean()),
         "empty%":     float(res["empty_stacks"].mean()),
         "cliff%":     float(res["cliffs"].mean()),
@@ -193,8 +222,15 @@ SUMMARY_COLS = [
     ("yard_dwell", "Idle ticks",   "avg time a container sits in the yard",     False, "{:.2f}"),
     ("cliff%",     "Cliffs %",     "neighbour stacks > cliff_tol tiers apart",  False, "{:.1f}"),
     ("full%",      "Full stacks %", "stacks at max height",                     False, "{:.1f}"),
+    ("overdue%",   "Overdue %",    "containers past the release deadline",      False, "{:.1f}"),
 ]
 BASELINES = ["Random", "FIFO", "Nearest", "Planner"]
+# Trade-off view (key, label, higher_is_better=None: context, not a goal by itself, fmt).
+TRADEOFF_COLS = [("batch_len", "batch length", None, "{:.2f}"),
+                 ("age_rank%", "age rank %", None, "{:.1f}"),
+                 ("dwell_out", "dwell at out", None, "{:.1f}"),
+                 ("same%", "same block %", None, "{:.1f}"),
+                 ("far%", "far %", None, "{:.1f}")]
 
 
 def _print_table(title, rows, cols, label_w=10, col_w=14):
@@ -248,18 +284,13 @@ def _verdict(perf, agent="Agent"):
 
 
 # Stress grid: fixed conditions (per-episode randomisation off), every policy, same seeds.
-STRESS_SCENARIOS = [
-    ("30% new",                dict(warmstart=0.3)),
-    ("30% mixed",              dict(warmstart=0.3, warmstart_aged=1.0)),
-    ("50% new",                dict(warmstart=0.5)),
-    ("50% mixed",              dict(warmstart=0.5, warmstart_aged=1.0)),
-    ("70% new",                dict(warmstart=0.7)),
-    ("70% mixed",              dict(warmstart=0.7, warmstart_aged=1.0)),
-    ("85% new",                dict(warmstart=0.85)),
-    ("85% mixed",              dict(warmstart=0.85, warmstart_aged=1.0)),
-    ("50% mixed, in-heavy",    dict(warmstart=0.5, warmstart_aged=1.0, max_in=12, max_out=8)),
-    ("50% mixed, out-heavy",   dict(warmstart=0.5, warmstart_aged=1.0, max_in=8, max_out=12)),
-]
+# Fixed pre-fill levels with sorted, long-tailed ages (the conditions the agent is trained on).
+STRESS_AGE_MEANS = (30.0, 90.0)
+STRESS_SCENARIOS = [(f"fill {int(f * 100)}% age {int(m)}",
+                     dict(warmstart=f, warmstart_aged=0.0, warmstart_age_mean=m,
+                          warmstart_age_mean_max=0.0, warmstart_age_max=365))
+                    for m in STRESS_AGE_MEANS
+                    for f in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)]
 STRESS_N_EPISODES = 30
 
 
@@ -315,8 +346,8 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
           f"{model_name or 'no model found — baselines only'}")
     print(f"  yard:  {_describe_yard(fixed)}; base demand in 0-{fixed.max_in} / "
           f"out 0-{fixed.max_out} per tick")
-    print("  'new' = pre-filled containers all age 0 (an already age-sorted yard);")
-    print("  'mixed' = random ages (a messy yard). in/out-heavy = demand caps 12/8 and 8/12.")
+    print("  fill = pre-filled share of capacity; age = mean of the long-tailed pre-filled ages")
+    print("  (capped at 365), sorted per stack with the oldest at the bottom.")
     print("=" * 78)
 
     scen_perf = {}
@@ -337,6 +368,9 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
             continue
         arrow = "higher" if hib else "lower"
         _print_matrix(f"{lab} — {unit} ({arrow} is better)", scen_perf, key, fmt, hib)
+    print("\nTRADE-OFF — batching vs age priority (context, no 'better' direction; * = highest)")
+    for key, lab, _, fmt in TRADEOFF_COLS[:3]:
+        _print_matrix(f"{lab}", scen_perf, key, fmt, True)
 
     if "Agent" in agent_policies:
         print("\nAGENT vs PLANNER — metrics where the agent is better, per scenario")
@@ -386,7 +420,8 @@ def main():
           f"{model_name or 'no model found — baselines only'}")
     print(f"  yard:  {_describe_yard(d)}, warmstart {d.warmstart:.0%}"
           f"{f'-{d.warmstart_max:.0%}' if d.warmstart_max > d.warmstart else ''}"
-          f"{f' (mixed ages p={d.warmstart_aged:g})' if d.warmstart_aged else ''}, "
+          f"{f' (mixed ages p={d.warmstart_aged:g})' if d.warmstart_aged else ''}"
+          f"{f' (sorted ages, mean {d.warmstart_age_mean:g})' if d.warmstart_age_mean else ''}, "
           f"demand in 0-{d.max_in} / out 0-{d.max_out} per tick"
           f"{f' (±{d.demand_jitter} per episode)' if d.demand_jitter else ''}")
     print(f"  mean occupancy: {next(iter(perf.values()))['occ%']:.0f}%  "
@@ -417,6 +452,8 @@ def main():
     _print_table("Retrieval block jumps (% of retrievals: crane stays / 1 block / 2+ blocks)", perf,
                  [("same%", "same block", None, "{:.1f}"), ("adj%", "adjacent", None, "{:.1f}"),
                   ("far%", "far", None, "{:.1f}")])
+    _print_table("Batching vs age priority (batch = consecutive retrievals from one block; "
+                 "age rank 100 = oldest in yard)", perf, TRADEOFF_COLS)
     _print_table("Yard shape (time-averaged)", perf,
                  [("full%", "full %", False, "{:.1f}"), ("empty%", "empty %", False, "{:.1f}"),
                   ("cliff%", "cliffs %", False, "{:.1f}"), ("h_std", "height std", False, "{:.2f}")])
