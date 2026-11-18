@@ -180,3 +180,15 @@ def test_warmstart_fill_range_drawn_per_episode():
         env.reset(seed=seed)
         fills.append((env.grid >= 0).mean())
     assert min(fills) < 0.2 and max(fills) > 0.75 and max(fills) <= 0.951
+
+
+def test_age_mean_drawn_per_episode():
+    from depot.env import DepotConfig, DepotEnv
+    env = DepotEnv(DepotConfig(warmstart=0.5, warmstart_age_mean=5, warmstart_age_mean_max=90,
+                               warmstart_age_max=365, max_in=0, max_out=0, n_ticks=1))
+    means = []
+    for seed in range(30):
+        env.reset(seed=seed)
+        means.append(env.ep_age_mean)
+    assert min(means) < 25 and max(means) > 70 and all(5 <= m <= 90 for m in means)
+    assert env.grid.max() <= 365 + 1

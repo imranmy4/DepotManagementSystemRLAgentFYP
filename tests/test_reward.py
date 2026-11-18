@@ -98,6 +98,13 @@ def test_tick_penalty_is_mean_log_age():
     assert np.isclose(env.reward_calc.tick_penalty(), -(np.log(5) + np.log(9)) / 2)
 
 
+def test_overdue_containers_charged_per_tick():
+    env = fresh_env(RewardConfig(w_mean_idle=0.0, max_age=90, w_overdue=1.0))
+    env.grid[:] = -1
+    env.grid[0, 0, 0, :3] = [120, 95, 10]
+    assert env.reward_calc.tick_penalty() == -2.0
+
+
 def test_every_skipped_tick_is_penalised():
     """A step that ends several ticks pays the idle penalty of each, as containers age."""
     env = fresh_env(RewardConfig(w_mean_idle=1.0), n_ticks=30)

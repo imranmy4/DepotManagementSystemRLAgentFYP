@@ -37,6 +37,10 @@ class RewardConfig:
 
     # Per tick: mean log(1 + age) of the containers in the yard.
     w_mean_idle:         float = 0.2
+    # Release deadline: each container older than max_age days costs w_overdue per tick, so a few
+    # overdue days outweigh a reshuffle and overdue containers are worth digging out.
+    max_age:             float = 150.0
+    w_overdue:           float = 1.0
 
 
 # Fields of earlier reward versions, still present in old run snapshots; ignored when loading.
@@ -99,11 +103,14 @@ class RewardCalculator:
     # ─── Per tick ────────────────────────────────────────────────────
 
     def tick_penalty(self) -> float:
-        """Idle penalty for one tick: mean log(1 + dwell) of the containers in the yard."""
+        """Penalty for one tick: mean log(1 + dwell) of the yard plus one charge per container
+        past the release deadline."""
         occupied = self.env.grid[self.env.grid >= 0]
         if len(occupied) == 0:
             return 0.0
-        return -self.config.w_mean_idle * float(np.log1p(occupied).mean())
+        overdue = int((occupied > self.config.max_age).sum())
+        return -(self.config.w_mean_idle * float(np.log1p(occupied).mean())
+                 + self.config.w_overdue * overdue)
 
     # ─── Per step ────────────────────────────────────────────────────
 

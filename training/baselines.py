@@ -82,7 +82,8 @@ def profile_caps(Ba: int, R: int, H: int, step: int) -> np.ndarray:
 def planner_action(env, rng):
     """Strong heuristic baseline — what a sensible yard planner would do.
 
-    Outbound: retrieve the container with the best immediate reward at the reward's own prices,
+    Outbound: containers past the release deadline (reward max_age) go out first; otherwise, and
+      among overdue ones, retrieve the container with the best immediate reward at the reward's own prices,
       age bonus + travel penalty − reshuffles (each priced as a same-block move), i.e. prefer old
       containers, dig only when the age gain outweighs the reshuffles, and prefer nearby ones.
     Inbound: obey the same safety rules the agent is rewarded for — never create a cliff
@@ -97,12 +98,15 @@ def planner_action(env, rng):
     if env.mode == 1:
         rc = env.reward_calc
         resh_cost = rc.config.w_reshuffle * rc.config.reshuffle_mult_same
+        ages = np.array([int(env.grid[bl, ba, r, h]) for _, bl, ba, r, h in decoded])
+        overdue = ages > rc.config.max_age
         scores = []
-        for _, bl, ba, r, h in decoded:
+        for (_, bl, ba, r, h), age in zip(decoded, ages):
             n_resh = int(heights[bl, ba, r]) - 1 - h
             dist = env.crane_dist(env.crane_pos, (bl, ba, r))
-            scores.append(rc.dwell_reward(int(env.grid[bl, ba, r, h]))
-                          + rc.travel_penalty(dist) - resh_cost * n_resh)
+            scores.append(rc.dwell_reward(age) + rc.travel_penalty(dist) - resh_cost * n_resh)
+        if overdue.any():                      # past the release deadline: these go out first
+            scores = np.where(overdue, scores, -np.inf)
         return _pick_best(valid, scores, rng, maximize=True)
 
     tol = env.reward_calc.config.cliff_tol

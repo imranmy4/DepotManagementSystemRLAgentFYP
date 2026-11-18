@@ -17,8 +17,8 @@ Output:
      best on it, with the % difference and a ✓/✗.
   3. DETAILS — per-episode totals, retrieval block jumps, and yard shape.
 
-With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 0% to 95%,
-ages long-tailed and sorted oldest-at-the-bottom), printing a summary table per scenario,
+With --stress, every policy is instead run over STRESS_SCENARIOS (yard fill 0% to 95% x a
+young and an old age profile, ages long-tailed and sorted oldest-at-the-bottom), printing a summary table per scenario,
 overview matrices (rows = scenarios), and an Agent-vs-Planner line per scenario.
     python training/evaluate.py --stress
 """
@@ -40,7 +40,7 @@ N_EPISODES = 50
 METRIC_KEYS = ["reward", "inbound", "outbound", "crane_travel",
                "reshuffles", "digs", "yard_dwell", "occ_ratio",
                "same_block", "adj_block", "far_block",
-               "block_runs", "age_rank", "dwell_out",
+               "block_runs", "age_rank", "dwell_out", "overdue",
                "full_stacks", "empty_stacks", "cliffs", "height_std"]
 
 
@@ -94,6 +94,8 @@ def run_episode(env, choose_action, seed):
     n_in = n_out = n_dig = 0
     n_same = n_adj = n_far = 0
     n_runs, last_block, age_rank, dwell_out = 0, None, 0.0, 0.0
+    overdue_samples = []
+    max_age = env.reward_calc.config.max_age
     dwell_samples, occ_samples = [], []
     layout_samples = []
     done = False
@@ -123,6 +125,8 @@ def run_episode(env, choose_action, seed):
         else:                                  # an inbound placement
             n_in += 1
         dwell_samples.append(_yard_mean_dwell(env))
+        occ = env.grid[env.grid >= 0]
+        overdue_samples.append(100.0 * float((occ > max_age).mean()) if occ.size else 0.0)
         occ_samples.append((env.grid >= 0).sum() / env.grid.size)
         layout_samples.append(_layout_metrics(env))
         done = term or trunc
@@ -141,6 +145,7 @@ def run_episode(env, choose_action, seed):
         "block_runs": n_runs,
         "age_rank": age_rank,
         "dwell_out": dwell_out,
+        "overdue": float(np.mean(overdue_samples)) if overdue_samples else 0.0,
         **{k: float(np.mean([s[k] for s in layout_samples])) if layout_samples else 0.0
            for k in ("full_stacks", "empty_stacks", "cliffs", "height_std")},
     }
@@ -178,6 +183,7 @@ def performance(res):
         "batch_len":  tot_out / max(1.0, res["block_runs"].sum()),
         "age_rank%":  100.0 * res["age_rank"].sum() / tot_out_safe,
         "dwell_out":  res["dwell_out"].sum() / tot_out_safe,
+        "overdue%":   float(res["overdue"].mean()),
         "full%":      float(res["full_stacks"].mean()),
         "empty%":     float(res["empty_stacks"].mean()),
         "cliff%":     float(res["cliffs"].mean()),
@@ -216,6 +222,7 @@ SUMMARY_COLS = [
     ("yard_dwell", "Idle ticks",   "avg time a container sits in the yard",     False, "{:.2f}"),
     ("cliff%",     "Cliffs %",     "neighbour stacks > cliff_tol tiers apart",  False, "{:.1f}"),
     ("full%",      "Full stacks %", "stacks at max height",                     False, "{:.1f}"),
+    ("overdue%",   "Overdue %",    "containers past the release deadline",      False, "{:.1f}"),
 ]
 BASELINES = ["Random", "FIFO", "Nearest", "Planner"]
 # Trade-off view (key, label, higher_is_better=None: context, not a goal by itself, fmt).
@@ -278,8 +285,11 @@ def _verdict(perf, agent="Agent"):
 
 # Stress grid: fixed conditions (per-episode randomisation off), every policy, same seeds.
 # Fixed pre-fill levels with sorted, long-tailed ages (the conditions the agent is trained on).
-STRESS_AGES = dict(warmstart_aged=0.0, warmstart_age_mean=29.0, warmstart_age_max=90)
-STRESS_SCENARIOS = [(f"fill {int(f * 100)}%", dict(warmstart=f, **STRESS_AGES))
+STRESS_AGE_MEANS = (30.0, 90.0)
+STRESS_SCENARIOS = [(f"fill {int(f * 100)}% age {int(m)}",
+                     dict(warmstart=f, warmstart_aged=0.0, warmstart_age_mean=m,
+                          warmstart_age_mean_max=0.0, warmstart_age_max=365))
+                    for m in STRESS_AGE_MEANS
                     for f in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)]
 STRESS_N_EPISODES = 30
 
@@ -336,8 +346,8 @@ def run_stress(args, run_dir, depot_config, reward_config, agent_policies, model
           f"{model_name or 'no model found — baselines only'}")
     print(f"  yard:  {_describe_yard(fixed)}; base demand in 0-{fixed.max_in} / "
           f"out 0-{fixed.max_out} per tick")
-    print("  fill = pre-filled share of capacity; pre-filled ages long-tailed (mean 29, max 90)")
-    print("  and sorted per stack with the oldest at the bottom.")
+    print("  fill = pre-filled share of capacity; age = mean of the long-tailed pre-filled ages")
+    print("  (capped at 365), sorted per stack with the oldest at the bottom.")
     print("=" * 78)
 
     scen_perf = {}

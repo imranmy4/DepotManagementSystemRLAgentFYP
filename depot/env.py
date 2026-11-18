@@ -36,6 +36,9 @@ class DepotConfig:
     # 0 = all ages 0.
     warmstart_age_mean: float = 0.0
     warmstart_age_max: int = 90
+    # warmstart_age_mean_max > warmstart_age_mean -> each episode's age mean is drawn uniformly
+    # in that range (young to old yards).
+    warmstart_age_mean_max: float = 0.0
 
 
 class DepotEnv(gym.Env):
@@ -231,6 +234,9 @@ class DepotEnv(gym.Env):
             self.ep_warmstart = float(rng.uniform(c.warmstart, c.warmstart_max))
         p = float(c.warmstart_aged)
         self.ep_warmstart_aged = p >= 1.0 or (p > 0.0 and bool(rng.random() < p))
+        self.ep_age_mean = float(c.warmstart_age_mean)
+        if c.warmstart_age_mean_max > c.warmstart_age_mean:
+            self.ep_age_mean = float(rng.uniform(c.warmstart_age_mean, c.warmstart_age_mean_max))
 
     def _warmstart_yard(self):
         """Pre-fill the yard flat to this episode's warmstart fraction (0.0–1.0).
@@ -261,7 +267,7 @@ class DepotEnv(gym.Env):
         if self.ep_warmstart_aged:
             ages = self.np_random.integers(0, max(1, c.n_ticks), size=self.grid.shape)
         elif c.warmstart_age_mean > 0:
-            ages = np.minimum(self.np_random.exponential(c.warmstart_age_mean, size=self.grid.shape),
+            ages = np.minimum(self.np_random.exponential(self.ep_age_mean, size=self.grid.shape),
                               c.warmstart_age_max).astype(np.int32)
         else:
             ages = np.zeros(self.grid.shape, dtype=np.int32)
