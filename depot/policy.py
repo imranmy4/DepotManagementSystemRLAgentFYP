@@ -85,22 +85,36 @@ class SlotNetwork(nn.Module):
                          _age(block_max).mean(-1)], dim=-1)
         return stack, slot, yard, glob
 
-    def forward_actor(self, obs):
-        stack, slot, yard, glob = self._features(obs)
-        ctx = self.context(th.cat([glob, yard], dim=-1))
-        n = obs.shape[0]
+    def _actor(self, stack, slot, ctx):
+        n = stack.shape[0]
         ctx_s = ctx.view(n, 1, 1, 1, -1).expand(*stack.shape[:4], -1)
-        place = self.place_score(th.cat([stack, ctx_s], dim=-1)).view(n, -1)
-        stack_c = th.cat([stack, ctx_s], dim=-1).unsqueeze(4).expand(*slot.shape[:5], -1)
-        retrieve = self.retrieve_score(th.cat([slot, stack_c], dim=-1)).view(n, -1)
+        stack_ctx = th.cat([stack, ctx_s], dim=-1)
+        place = self.place_score(stack_ctx).view(n, -1)
+        # The retrieval head's first layer is linear in [slot, stack, context], so the stack and
+        # context part is computed once per stack and shared by its slots (same function as
+        # applying the full layer per slot, without repeating that work for every tier).
+        first, rest = self.retrieve_score[0], self.retrieve_score[1:]
+        w_slot, w_stack = first.weight[:, :self.N_SLOT], first.weight[:, self.N_SLOT:]
+        per_stack = nn.functional.linear(stack_ctx, w_stack, first.bias).unsqueeze(4)
+        hidden = nn.functional.linear(slot, w_slot) + per_stack
+        retrieve = rest(hidden).view(n, -1)
         return th.cat([place, retrieve], dim=1)          # action order of DepotEnv
 
+    def _critic(self, ctx, yard):
+        return self.value_net(th.cat([ctx, yard], dim=-1))
+
+    def forward_actor(self, obs):
+        stack, slot, yard, glob = self._features(obs)
+        return self._actor(stack, slot, self.context(th.cat([glob, yard], dim=-1)))
+
     def forward_critic(self, obs):
-        stack, _, yard, glob = self._features(obs)
-        return self.value_net(th.cat([self.context(th.cat([glob, yard], dim=-1)), yard], dim=-1))
+        _, _, yard, glob = self._features(obs)
+        return self._critic(self.context(th.cat([glob, yard], dim=-1)), yard)
 
     def forward(self, obs):
-        return self.forward_actor(obs), self.forward_critic(obs)
+        stack, slot, yard, glob = self._features(obs)
+        ctx = self.context(th.cat([glob, yard], dim=-1))
+        return self._actor(stack, slot, ctx), self._critic(ctx, yard)
 
 
 class SlotPolicy(MaskableActorCriticPolicy):
