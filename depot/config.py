@@ -117,6 +117,10 @@ class TrainConfig:
     torch_threads: int = 4
     # Seed for the model and the training/eval envs (reproducible runs).
     seed: int = 0
+    # Policy network: "slot" = per-slot scoring (depot.policy.SlotPolicy, raw observations),
+    # "mlp" = flat MLP over the normalised observation (net_arch).
+    policy: str = "slot"
+    slot_hidden: int = 64
 
 
 def resolve_config(args=None, ini_path=None):
