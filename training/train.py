@@ -30,6 +30,22 @@ from depot.policy import SlotPolicy
 from depot.reward import RewardConfig
 
 
+class _FixedEpisodesEval(MaskableEvalCallback):
+    """Evaluates every checkpoint on the same episodes: reseeds the eval env before each run.
+
+    The env draws the same randomness per episode whatever the policy does, so each evaluation
+    replays identical yards and demand, making scores (and the best_model choice) comparable.
+    """
+    def __init__(self, *args, eval_seed, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eval_seed = eval_seed
+
+    def _on_step(self) -> bool:
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            self.eval_env.seed(self.eval_seed)
+        return super()._on_step()
+
+
 class _SaveVecNormalize(BaseCallback):
     """Persist the training VecNormalize stats to `save_path` whenever invoked.
 
@@ -46,6 +62,9 @@ class _SaveVecNormalize(BaseCallback):
         self.vec_env.save(self.save_path)
         return True
 
+
+# Parallel eval envs (evaluation speed only; episodes are fixed by the eval seed).
+EVAL_ENVS = 10
 
 # Direct MaskablePPO constructor kwargs (net_arch is handled separately via policy_kwargs).
 PPO_KEYS = ["learning_rate", "n_steps", "batch_size", "n_epochs",
@@ -160,17 +179,17 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
     # from the training env before each eval; norm_reward is off there so the reported eval
     # reward is raw. callback_on_new_best snapshots the matching normalizer alongside
     # best_model so it is always evaluable.
-    eval_env = make_vec_env(depot, reward, 1, norm_obs=norm_obs)
-    eval_env.seed(train_cfg.seed + 10_000)      # different episodes from training
+    eval_env = make_vec_env(depot, reward, EVAL_ENVS, norm_obs=norm_obs)
     eval_env.training = False
     eval_env.norm_reward = False
     save_best_vn = _SaveVecNormalize(vec_env, os.path.join(run_dir, "best_vec_normalize.pkl"))
-    eval_cb = MaskableEvalCallback(
+    eval_cb = _FixedEpisodesEval(
         eval_env,
+        eval_seed=train_cfg.seed + 10_000,       # different episodes from training and benchmark
         best_model_save_path=run_dir,
         log_path=run_dir,
-        eval_freq=max(100_000 // train_cfg.n_envs, 1),
-        n_eval_episodes=20,
+        eval_freq=max(train_cfg.eval_freq // train_cfg.n_envs, 1),
+        n_eval_episodes=train_cfg.eval_episodes,
         deterministic=True,
         callback_on_new_best=save_best_vn,
     )

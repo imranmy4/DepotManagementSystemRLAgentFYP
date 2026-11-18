@@ -121,6 +121,9 @@ class TrainConfig:
     # "mlp" = flat MLP over the normalised observation (net_arch).
     policy: str = "slot"
     slot_hidden: int = 64
+    # Checkpoint evaluation: every eval_freq steps, on the same eval_episodes fixed episodes.
+    eval_freq: int = 200_000
+    eval_episodes: int = 50
 
 
 def resolve_config(args=None, ini_path=None):
