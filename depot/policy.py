@@ -6,7 +6,9 @@ yard as context. Learning "the oldest accessible container near the crane" is th
 comparison at every slot, instead of separate output weights per slot as in a flat MLP.
 
 Works on the raw (unnormalised) observation of DepotEnv; the yard dimensions come from
-policy_kwargs (`yard=(B, Ba, R, H)`, `max_dist`).
+policy_kwargs (`yard=(B, Ba, R, H)`, `max_dist`). With `max_age` (the release deadline in days)
+each slot and stack also gets an overdue flag and its distance to the deadline: on the log-age
+scale alone the deadline is a ~1 % difference in the input.
 """
 import torch as th
 from torch import nn
@@ -27,14 +29,16 @@ def _age(x):
 class SlotNetwork(nn.Module):
     """Actor: per-action scores (logits). Critic: value features from a yard summary."""
 
-    N_STACK = 10        # per-stack features
-    N_SLOT = 4          # per-slot features (added to the stack's)
     N_GLOBAL = 9
 
-    def __init__(self, yard, max_dist, hidden=64, context=64, value_hidden=256):
+    def __init__(self, yard, max_dist, hidden=64, context=64, value_hidden=256, max_age=None):
         super().__init__()
         self.B, self.Ba, self.R, self.H = yard
         self.max_dist = float(max_dist)
+        self.max_age = None if max_age is None else float(max_age)
+        deadline = 2 if self.max_age else 0
+        self.N_STACK = 10 + deadline        # per-stack features
+        self.N_SLOT = 4 + deadline          # per-slot features (added to the stack's)
         self.n_cells = self.B * self.Ba * self.R * self.H
         self.n_stacks = self.B * self.Ba * self.R
         self.context = nn.Sequential(nn.Linear(self.N_GLOBAL + 2 * self.N_STACK, context), nn.ReLU())
@@ -57,6 +61,15 @@ class SlotNetwork(nn.Module):
         block_max = obs[:, o + 4 * s + 8:o + 4 * s + 8 + B]
         return occ, dwell, height, top, smax, dist, sc, block_max
 
+    def _deadline(self, age, present):
+        """[overdue flag, (age - deadline) / deadline in [-1, 1]] where a container is present;
+        nothing without a deadline."""
+        if not self.max_age:
+            return []
+        p = present.float()
+        return [(age > self.max_age).float() * p,
+                th.clamp((age - self.max_age) / self.max_age, -1.0, 1.0) * p]
+
     def _features(self, obs):
         occ, dwell, height, top, smax, dist, sc, block_max = self._parse(obs)
         n, B, Ba, R, H = obs.shape[0], self.B, self.Ba, self.R, self.H
@@ -73,11 +86,13 @@ class SlotNetwork(nn.Module):
             dist / self.max_dist, nb_mean, nb_max,
             _age(block_max).view(n, B, 1, 1).expand(n, B, Ba, R),
             h - nb_mean,
+            *self._deadline(smax, height > 0),
         ], dim=-1)                                                       # (n, B, Ba, R, N_STACK)
 
         tier = th.arange(H, device=obs.device, dtype=obs.dtype).view(1, 1, 1, 1, H)
         above = (height.unsqueeze(-1) - 1 - tier).clamp(min=0) * occ     # containers above the slot
-        slot = th.stack([occ, _age(dwell), above / H, tier.expand_as(occ) / H], dim=-1)
+        slot = th.stack([occ, _age(dwell), above / H, tier.expand_as(occ) / H,
+                         *self._deadline(dwell, occ > 0)], dim=-1)
 
         yard = th.cat([stack.mean(dim=(1, 2, 3)), stack.amax(dim=(1, 2, 3))], dim=-1)
         glob = th.stack([sc[:, 0], sc[:, 1] / 30.0, sc[:, 2] / max(B - 1, 1), sc[:, 3] / max(Ba - 1, 1),
@@ -120,12 +135,14 @@ class SlotNetwork(nn.Module):
 class SlotPolicy(MaskableActorCriticPolicy):
     """MaskablePPO policy whose logits are the SlotNetwork scores."""
 
-    def __init__(self, *args, yard=None, max_dist=None, slot_hidden=64, **kwargs):
+    def __init__(self, *args, yard=None, max_dist=None, slot_hidden=64, max_age=None, **kwargs):
         self.yard, self.max_dist, self.slot_hidden = tuple(yard), max_dist, slot_hidden
+        self.max_age = max_age
         super().__init__(*args, **kwargs)
 
     def _build_mlp_extractor(self) -> None:
-        self.mlp_extractor = SlotNetwork(self.yard, self.max_dist, hidden=self.slot_hidden)
+        self.mlp_extractor = SlotNetwork(self.yard, self.max_dist, hidden=self.slot_hidden,
+                                         max_age=self.max_age)
 
     def _build(self, lr_schedule) -> None:
         super()._build(lr_schedule)
@@ -140,5 +157,6 @@ class SlotPolicy(MaskableActorCriticPolicy):
 
     def _get_constructor_parameters(self):
         data = super()._get_constructor_parameters()
-        data.update(yard=self.yard, max_dist=self.max_dist, slot_hidden=self.slot_hidden)
+        data.update(yard=self.yard, max_dist=self.max_dist, slot_hidden=self.slot_hidden,
+                    max_age=self.max_age)
         return data

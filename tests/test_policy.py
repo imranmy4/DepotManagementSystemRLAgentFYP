@@ -53,3 +53,18 @@ def test_retrieval_score_shared_across_slots():
     i1 = env.n_inbound + 0 * 96 + 1 * 24 + 2 * 6     # (0,1,2,0)
     i2 = env.n_inbound + 0 * 96 + 2 * 24 + 1 * 6     # (0,2,1,0) — same distance, same neighbours
     assert th.isclose(logits[i1], logits[i2])
+
+
+def test_deadline_features_mark_overdue_slots():
+    env = DepotEnv(CFG)
+    env.reset(seed=1)
+    env.grid[:] = -1
+    env.grid[0, 0, 0, :2] = [200, 100]          # bottom overdue, top not
+    net = SlotNetwork((CFG.n_blocks, CFG.n_bays, CFG.n_rows, CFG.n_tiers), max_dist=9, max_age=150)
+    stack, slot, _, _ = net._features(th.as_tensor(env._get_obs()).unsqueeze(0))
+    assert slot.shape[-1] == 6 and stack.shape[-1] == 12
+    assert slot[0, 0, 0, 0, 0, 4] == 1.0 and slot[0, 0, 0, 0, 1, 4] == 0.0
+    assert np.isclose(slot[0, 0, 0, 0, 0, 5].item(), (200 - 150) / 150)
+    assert slot[0, 0, 0, 0, 2, 4] == 0.0 and slot[0, 0, 0, 0, 2, 5] == 0.0   # empty slot
+    assert stack[0, 0, 0, 0, 10] == 1.0                                       # oldest is overdue
+    assert net.forward_actor(th.as_tensor(env._get_obs()).unsqueeze(0)).shape == (1, env.n_actions)

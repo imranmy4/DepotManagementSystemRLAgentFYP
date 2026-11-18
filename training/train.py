@@ -92,13 +92,14 @@ def make_vec_env(depot_config, reward_config, n_envs, norm_obs=True):
     return VecNormalize(venv, norm_obs=norm_obs, norm_reward=True, clip_obs=10.0)
 
 
-def policy_setup(depot, train_cfg):
+def policy_setup(depot, reward, train_cfg):
     """(policy class, policy_kwargs, normalise observations?) for the configured network."""
     if train_cfg.policy == "slot":
         env = DepotEnv(depot)
         max_dist = env.crane_dist((0, 0, 0), (depot.n_blocks - 1, depot.n_bays - 1, depot.n_rows - 1))
         kwargs = dict(yard=(depot.n_blocks, depot.n_bays, depot.n_rows, depot.n_tiers),
-                      max_dist=max(1, max_dist), slot_hidden=train_cfg.slot_hidden)
+                      max_dist=max(1, max_dist), slot_hidden=train_cfg.slot_hidden,
+                      max_age=reward.max_age if reward.w_overdue > 0 else None)
         return SlotPolicy, kwargs, False
     if train_cfg.policy == "mlp":
         layers = [int(x) for x in str(train_cfg.net_arch).split(",") if x.strip()]
@@ -136,7 +137,7 @@ def train(depot, reward, train_cfg, total_timesteps=None, resume=None, set_curre
     if train_cfg.torch_threads > 0:
         torch.set_num_threads(train_cfg.torch_threads)
 
-    policy_class, policy_kwargs, norm_obs = policy_setup(depot, train_cfg)
+    policy_class, policy_kwargs, norm_obs = policy_setup(depot, reward, train_cfg)
     vec_env = make_vec_env(depot, reward, train_cfg.n_envs, norm_obs=norm_obs)
     vec_env.seed(train_cfg.seed)
     ppo_kwargs = {k: getattr(train_cfg, k) for k in PPO_KEYS}
