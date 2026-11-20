@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app import iso6346
 from app.db.models import (
     Container, ContainerLocation, MoveLog, MoveStatus, MoveType, Order, OrderStatus, OrderType,
-    Slot, YardState,
+    Slot, YardBlock, YardState,
 )
 
 Pos = tuple[int, int, int, int]
@@ -104,6 +104,26 @@ def crane_position(session: Session) -> tuple[int, int, int]:
 def order_moves(session: Session, order_id: int) -> list[MoveLog]:
     return list(session.scalars(
         select(MoveLog).where(MoveLog.order_id == order_id).order_by(MoveLog.seq)))
+
+
+def recent_orders(session: Session, limit: int = 50,
+                  status: OrderStatus | None = None) -> list[Order]:
+    """Latest orders first, optionally of one status."""
+    q = select(Order).order_by(Order.order_id.desc()).limit(limit)
+    if status is not None:
+        q = q.where(Order.status == status)
+    return list(session.scalars(q))
+
+
+def yard_blocks(session: Session) -> list[YardBlock]:
+    """Block layout (dimensions and grid position), by block id."""
+    return list(session.scalars(select(YardBlock).order_by(YardBlock.block_id)))
+
+
+def slot_positions(session: Session) -> dict[int, Pos]:
+    """Every slot id with its (block, bay, row, tier)."""
+    return {sid: (b, ba, r, t) for sid, b, ba, r, t in session.execute(
+        select(Slot.slot_id, Slot.block_id, Slot.bay, Slot.row, Slot.tier))}
 
 
 def _slot_id(session: Session, pos: Pos) -> int:
